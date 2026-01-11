@@ -12,10 +12,10 @@ services:
     # The command is built using the variable from our .env file.
     # This keeps the secret out of the main configuration.
     command: >
-      --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+      --model cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit
       --host 0.0.0.0
       --port 8000
-      --max-model-len 48000
+      --max-model-len 150000
       --gpu-memory-utilization 0.85
       --guided-decoding-backend xgrammar
       --enable-auto-tool-choice
