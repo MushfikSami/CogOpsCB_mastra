@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing import Dict, Any
 
 # --- MODIFIED: Import your ChatAgent class ---
-from cogops.agent import ChatAgent
+from cogops.agents.prositional_agent import ChatAgent
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Global Configuration ---

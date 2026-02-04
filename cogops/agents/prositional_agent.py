@@ -15,9 +15,9 @@ from requests.exceptions import RequestException
 
 # --- Core Component Imports ---
 # The new master prompt that defines the agent's behavior and tool usage
-from cogops.prompt import get_agent_prompt
+from cogops.prompts.propositional_prompt import get_agent_prompt
 # The available tools (functions and their schemas) for the agent
-from cogops.tools import tools_list, available_tools_map
+from cogops.tools.propositional_tools import tools_list, available_tools_map
 # The asynchronous LLM service with tool-calling capabilities
 from cogops.models.qwen3async_llm import AsyncLLMService
 # The token manager is still useful for formatting history

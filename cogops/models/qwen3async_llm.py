@@ -8,7 +8,6 @@ from openai import AsyncOpenAI, APIError, BadRequestError
 from typing import Any, Type, TypeVar, AsyncGenerator, List, Dict
 from pydantic import BaseModel, Field
 from cogops.utils.prompt import build_structured_prompt
-from cogops.tools import tools_list, available_tools_map
 # Load environment variables and set up logging
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -327,6 +326,7 @@ async def main():
     # Test 6: Invoke with Tools (Retriever Tool Example)
     print("\n--- Test 6: Invoke with Tools - Retriever Tool Example (Async) ---")
     try:
+        from cogops.tools.propositional_tools import tools_list, available_tools_map
         user_prompt = "আমার এন আই ডি হারায়ে গেছে রাস্তায়, কি করব?"
         print(f"Prompt: {user_prompt}")
         messages = [{"role": "user", "content": user_prompt}]
