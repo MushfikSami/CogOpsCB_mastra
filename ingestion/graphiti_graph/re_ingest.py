@@ -16,12 +16,8 @@ from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.llm_client.config import LLMConfig
 
-# Local Imports
-try:
-    from triton_embedder import TritonEmbedder, TritonEmbedderConfig
-    from qwen3_reranker import QwenRerankerClient
-except ImportError as e:
-    raise ImportError(f"Could not import custom modules: {e}")
+from cogops.models.triton_embedder import TritonEmbedder, TritonEmbedderConfig
+from cogops.models.qwen3_reranker import QwenRerankerClient
 
 # ==========================================
 # LOGGING SETUP
