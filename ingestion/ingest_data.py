@@ -155,7 +155,7 @@ def ingest_to_chroma(chroma_client: chromadb.Client, embedder: GemmaTritonEmbedd
 def main():
     """Main function to orchestrate the entire ingestion pipeline."""
     parser = argparse.ArgumentParser(description="Ingest processed data into PostgreSQL and ChromaDB.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the agent's config.yaml file.")
+    parser.add_argument("--config", type=str, required=True, help="Path to the agent's v1.yaml file.")
     parser.add_argument("--json_folder", type=str, required=True, help="Path to the folder with processed JSON files.")
     args = parser.parse_args()
 

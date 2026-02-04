@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # --- Global Configuration ---
 # Define the path to your config file once
-AGENT_CONFIG_PATH = "configs/config.yaml"
+AGENT_CONFIG_PATH = "configs/v1.yaml"
 
 # --- API Setup ---
 app = FastAPI(

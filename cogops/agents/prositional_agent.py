@@ -36,7 +36,7 @@ class ChatAgent:
     necessary tools (like a knowledge base retriever), and synthesize a final
     answer based on the tool outputs.
     """
-    def __init__(self, config_path: str = "configs/config.yaml"):
+    def __init__(self, config_path: str = "configs/v1.yaml"):
         logging.info("Initializing Tool-Based ChatAgent...")
         self.config = self._load_config(config_path)
         
@@ -174,7 +174,7 @@ class ChatAgent:
 async def main():
     """Main function to demonstrate a conversational flow with the ChatAgent."""
     try:
-        agent = ChatAgent(config_path="configs/config.yaml")
+        agent = ChatAgent(config_path="configs/v1.yaml")
         
         queries = [
             # "হ্যালো, আপনি কে?", # Identity inquiry

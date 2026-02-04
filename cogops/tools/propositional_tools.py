@@ -18,7 +18,7 @@ from typing import List, Dict, Any, Tuple
 # Adjust these paths based on your actual project structure
 from cogops.retriver.vector_search import VectorRetriever  # Assuming this is where VectorRetriever is defined
 
-CONFIG_CONSTANT=os.path.expanduser("~/CogOpsCB/configs/config.yaml")
+CONFIG_CONSTANT=os.path.expanduser("~/CogOpsCB/configs/v1.yaml")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

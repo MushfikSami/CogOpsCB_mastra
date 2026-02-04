@@ -25,7 +25,7 @@ class VectorRetriever:
     fusing the results using RRF to get the top passage IDs, and then fetching the
     full passage content from a PostgreSQL database.
     """
-    def __init__(self, config_path: str = "configs/config.yaml"):
+    def __init__(self, config_path: str = "configs/v1.yaml"):
         logging.info("Initializing VectorRetriever...")
         full_config = self._load_config(config_path)
         retriever_config = full_config.get("vector_retriever")
@@ -202,7 +202,7 @@ async def main():
     """Main function to test the VectorRetriever."""
     retriever = None
     try:
-        retriever = VectorRetriever(config_path="configs/config.yaml")
+        retriever = VectorRetriever(config_path="configs/v1.yaml")
         user_query = "আমার এন আই ডি হারায়ে গেছে রাস্তায়"
         
         print(f"\n--- Testing retrieval for query: '{user_query}' ---")
