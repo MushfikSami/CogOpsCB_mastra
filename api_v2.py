@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import logging
 import uvicorn
@@ -6,13 +7,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict
-
-# --- Import the GovOps Orchestrator ---
+from typing import Dict,Optional
+from fastapi import Header
+from dotenv import load_dotenv
 from cogops.agents.graphiti_agent import GraphitiAgent
 
+load_dotenv()
+
 # --- Configuration ---
-API_PORT = 9005
+API_PORT = 9000
 API_HOST = "0.0.0.0"
 AGENT_CONFIG_PATH = "configs/v2.yaml"
 
@@ -82,8 +85,8 @@ async def health_check():
         "active_sessions": len(active_sessions)
     }
 
-@app.post("/gov/chat/stream", tags=["Chat"])
-async def stream_chat(request: ChatRequest):
+@app.post("/chat/stream", tags=["Chat"])
+async def stream_chat(request: ChatRequest,x_debug_key: Optional[str] = Header(None, alias="X-Debug-Key") ):
     """
     Main Chat Endpoint.
     Streams the agent's response (and tool logs) as Newline Delimited JSON (NDJSON).
@@ -92,13 +95,15 @@ async def stream_chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     agent = await get_agent_session(request.user_id)
+    server_debug_secret = os.getenv("ADMIN_DEBUG_SECRET")
+    debug_mode = (server_debug_secret is not None) and (x_debug_key == server_debug_secret)
 
     async def event_generator():
         try:
             # Process the query through the agent pipeline
-            async for event in agent.process_query(request.query):
+            async for event in agent.process_query(request.query,debug_mode=debug_mode):
                 # Serialize event to JSON string
-                json_str = json.dumps(event, ensure_ascii=False)
+                json_str = json.dumps(event, ensure_ascii=True) 
                 yield f"{json_str}\n"
                 # Brief sleep to allow asyncio loop to breathe under load
                 await asyncio.sleep(0.001)
@@ -113,7 +118,7 @@ async def stream_chat(request: ChatRequest):
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
-@app.post("/gov/session/clear", tags=["Session"])
+@app.post("/session/clear", tags=["Session"])
 async def clear_session(request: SessionRequest):
     """
     Wipes the conversation history for a specific user.

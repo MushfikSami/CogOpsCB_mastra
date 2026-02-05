@@ -27,7 +27,7 @@ EnvironmentFile=/home/vpa/CogOpsCB/.env
 # It uses the absolute path to the uvicorn executable within your specific Conda environment.
 # We also specify the file name 'api:app' which is standard.
 # The --workers flag runs multiple processes to handle more concurrent requests.
-ExecStart=/home/vpa/miniconda3/envs/cogops/bin/uvicorn api_v1:app --host 0.0.0.0 --port 9000 --workers 4
+ExecStart=/home/vpa/miniconda3/envs/cogops/bin/uvicorn api_v2:app --host 0.0.0.0 --port 9000 --workers 4
 
 # --- Service Behavior ---
 # Always restart the service if it stops unexpectedly (e.g., crashes).

@@ -110,11 +110,11 @@ async def graph_search(query: str) -> str:
         md_content = ""
 
         # Nodes Section
-        md_content += "## Nodes\n"
+        md_content += "\n## Nodes\n"
         node_summaries = []
         for node, score in zip(results.nodes, results.node_reranker_scores):
             if score > reranker_thresh:
-                node_summaries.append(node.summary)
+                node_summaries.append(f"**{node.name}**:{node.summary}")
         if node_summaries:
             md_content += "- " + "\n- ".join(node_summaries[:limit]) + "\n\n"
         else:
@@ -138,11 +138,11 @@ async def graph_search(query: str) -> str:
         for episode, score in zip(results.episodes, results.episode_reranker_scores):
             if score > reranker_thresh:
                 json_episode = literal_eval(episode.content)
-                text = json_episode["text"].split("Category")[0].strip()
-                #url = json_episode.get("url", "")  # Assuming 'url' key exists
+                passage= json_episode["text"].split("Category")[0].strip()
+                context=json_episode["text"].split("Category")[-1].strip()
+                url = json_episode.get("url", "")  # Assuming 'url' key exists
+                text=f"# passage_context:\n {context}\n\n # passage_text:\n{passage} \n # Sources:\n{url}"
                 episode_data.append(text)
-                # if url:
-                #     urls.append(url)
         if episode_data:
             md_content += "- " + "\n- ".join(episode_data[:limit]) + "\n\n"
         else:

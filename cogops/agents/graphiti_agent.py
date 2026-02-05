@@ -88,7 +88,7 @@ class GraphitiAgent:
             max_tokens=self.llm_service.max_context_tokens # Pass dynamic limit if needed
         )
 
-    async def process_query(self, user_query: str) -> AsyncGenerator[Dict[str, Any], None]:
+    async def process_query(self, user_query: str,debug_mode:bool=False) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main Pipeline:
         1. Build Prompt -> 2. Stream LLM (with CoT Hiding) -> 3. Tool Loop -> 4. Final Answer
@@ -124,7 +124,7 @@ class GraphitiAgent:
                 messages=messages,
                 tools=self.tools_schema,
                 available_tools=self.tool_map,
-                debug_mode=True, # Set to True to see CoT logs in console (optional)
+                debug_mode=debug_mode, # Set to True to see CoT logs in console (optional)
                 **self.llm_call_params
             )
 

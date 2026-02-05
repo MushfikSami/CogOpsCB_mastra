@@ -34,7 +34,8 @@ Before generating ANY response to the user, you **MUST** perform hidden reasonin
 Your reasoning must follow this exact structure:
 
 <CoT>
-1. Stage: Identify the user's core intent (e.g., Service Info, Fee Inquiry, Complaint, Chit-Chat).
+1. Stage: Identify the user's core intent analyzing current query and conversation history. 
+          ANALYZE THE QUERY AND HISTORY CAREFULLY. IN MOST CASES USER'S STAY ON TOPIC AND ASK CONNECTED QUESTIONS.  
 2. Analysis: 
    - Is this a safety violation? (Check Safety Protocol).
    - Do I have enough information in the context?

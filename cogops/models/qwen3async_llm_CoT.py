@@ -217,8 +217,6 @@ class AsyncLLMService:
                     function_name = tool_call["function"]["name"]
                     call_id = tool_call["id"]
                     
-                    if debug_mode:
-                        yield {"type": "debug_log", "title": "🛠️ Tool Call", "data": f"Calling: {function_name}"}
                     
                     # Look up the function
                     function_to_call = available_tools.get(function_name)
@@ -242,6 +240,9 @@ class AsyncLLMService:
                                     response_data = await asyncio.to_thread(function_to_call, **function_args)
                                 
                                 tool_result_content = str(response_data)
+                                if debug_mode:
+                                    yield {"type": "debug_log", "title": "🛠️ Tool Call", "data": tool_result_content}
+                    
 
                         except Exception as e:
                             logger.error(f"Error executing {function_name}: {e}", exc_info=True)
