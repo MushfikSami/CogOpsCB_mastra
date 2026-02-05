@@ -59,12 +59,12 @@ class QwenRerankerClient(OpenAIRerankerClient):
             [
                 Message(
                     role='system',
-                    content='You are an expert tasked with determining whether the passage is relevant to the query',
+                    content='You are an expert tasked with determining whether the passage contains the answer to the query',
                 ),
                 Message(
                     role='user',
                     content=f"""
-                           Respond with "True" if PASSAGE is relevant to QUERY and "False" otherwise.
+                           Respond with "True" if PASSAGE contains the answer to QUERY and "False" otherwise.
                            <PASSAGE>
                            {passage}
                            </PASSAGE>
