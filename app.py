@@ -10,7 +10,7 @@ CLEAR_ENDPOINT = f"{API_BASE_URL}/session/clear"
 
 # --- Page Setup ---
 st.set_page_config(
-    page_title="সেবা বন্ধু - সরকারী তথ্য সহকারী",
+    page_title="RAMDOM UI - Government Services Chatbot",
     page_icon="🇧🇩",
     layout="wide"
 )
@@ -45,7 +45,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "আসসালামু আলাইকুম! আমি **সেবা বন্ধু**।\n\nবাংলাদেশ সরকারের বিভিন্ন সেবা, ফি, এবং নিয়মাবলি সম্পর্কে সঠিক তথ্য দিয়ে আপনাকে সাহায্য করাই আমার কাজ।\n\nআজ আপনাকে কীভাবে সাহায্য করতে পারি?"
+            "content": "আসসালামু আলাইকুম! বাংলাদেশ সরকারের বিভিন্ন সেবা, ফি, এবং নিয়মাবলি সম্পর্কে সঠিক তথ্য দিয়ে আপনাকে সাহায্য করাই আমার কাজ।\n\nআজ আপনাকে কীভাবে সাহায্য করতে পারি?"
         }
     ]
 
@@ -78,7 +78,7 @@ with st.sidebar:
         clear_session()
 
 # 2. Main Header
-st.title("🇧🇩 সেবা বন্ধু (Seba Bondhu)")
+st.title("DUMMY UI - Government Services Chatbot")
 st.caption("আপনার ব্যক্তিগত সরকারী সেবা সহকারী | Powered by Graphiti & GovOps AI")
 
 # 3. Chat History Render Loop
