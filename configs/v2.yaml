@@ -27,7 +27,7 @@ graph_search:
 # --- Token & Prompt Management ---
 # Controls how the final prompt is assembled in graphiti_agents.py
 token_management:
-  tokenizer_model_env: "VLLM_MODEL_NAME"
+  tokenizer_model_env: "TOKENIZER_MODEL_NAME"
   system_prompt_reservation: 1600  # Tokens reserved for the heavy SOP instructions
   history_budget: 0.3              # 30% of remaining space allocated to history
   # Remaining 70% is automatically allocated to tool results (graph facts)
