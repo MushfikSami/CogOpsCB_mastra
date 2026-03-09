@@ -207,3 +207,4 @@ marimo/_lsp/
 __marimo__/
 debug*
 unstable/no_vector_rag_PageIndex/
+ingestion/graphiti_graph/.ingestion_pids/

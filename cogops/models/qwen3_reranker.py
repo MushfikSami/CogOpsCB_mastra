@@ -28,14 +28,14 @@ from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerCli
 
 logger = logging.getLogger(__name__)
 
-# --- QWEN3 TOKEN CONFIGURATION ---
-# These IDs correspond to the Qwen3-30B tokenizer.
+# --- QWEN3.5 TOKEN CONFIGURATION ---
+# These IDs correspond to the Qwen3.5-35B tokenizer.
 # We include both the word itself and the word with a leading space
 # to handle potential whitespace variations in generation.
-# True:  2514 ("True"), 3007 (" True")
-# False: 4049 ("False"), 3557 (" False")
-QWEN_TRUE_IDS = ['2514', '3007']
-QWEN_FALSE_IDS = ['4049', '3557']
+# True:  2434 ("True"), 2912 (" True")
+# False: 3913 ("False"), 3439 (" False")
+QWEN_TRUE_IDS = [2434, 2912]
+QWEN_FALSE_IDS = [3913, 3439]
 
 # Combine them for the bias dictionary.
 # We use a bias of 100 to FORCE the model to pick only these tokens.
@@ -46,8 +46,8 @@ DEFAULT_MODEL = 'qwen3'  # Placeholder, usually overridden by config
 
 class QwenRerankerClient(OpenAIRerankerClient):
     """
-    A Reranker client specifically adapted for Qwen3 / vLLM.
-    
+    A Reranker client specifically adapted for Qwen3.5 / vLLM.
+
     It inherits from OpenAIRerankerClient but overrides the `rank` method
     to use Qwen-specific Token IDs for logit_bias.
     """
