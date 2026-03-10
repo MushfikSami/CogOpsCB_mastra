@@ -20,60 +20,44 @@ from cogops.models.triton_embedder import TritonEmbedder, TritonEmbedderConfig
 from cogops.models.qwen3_reranker import QwenRerankerClient
 
 # ==========================================
-# MONITORING SETUP
-# ==========================================
-# Import monitor server (optional - re-ingest works without it)
-try:
-    from monitor_server import monitor, setup_ingestion_logging
-    MONITORING_ENABLED = True
-    logger = logging.getLogger("re_ingest")
-    log_handler = setup_ingestion_logging()
-except ImportError:
-    MONITORING_ENABLED = False
-    logger = logging.getLogger("re_ingest")
-
-# ==========================================
 # LOGGING SETUP
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("re_ingest")
 
 # Silence noisy logs
 logging.getLogger("neo4j").setLevel(logging.CRITICAL)
 logging.getLogger("graphiti_core").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+
 def parse_failed_indices(log_file_path: str) -> set:
     """
-    Parses the log file to find row indices marked with ❌.
-    Expects format: "❌ [Row 123] Failed: ..."
+    Parses the log file to find row indices marked with failure indicators.
+    Expects format: "X [Row 123] Failed: ..." or "❌ [Row 123] Failed: ..."
     """
     failed_indices = set()
-    pattern = re.compile(r"❌\s*\[Row\s+(\d+)\]")
+    # Match both "X" (clean format) and "❌" (old format with special char)
+    pattern = re.compile(r"(?:X|❌)\s*\[Row\s+(\d+)\]")
 
     try:
         with open(log_file_path, 'r', encoding='utf-8') as f:
             for line in f:
-                if "❌" in line:
-                    match = pattern.search(line)
-                    if match:
-                        idx = int(match.group(1))
-                        failed_indices.add(idx)
+                match = pattern.search(line)
+                if match:
+                    idx = int(match.group(1))
+                    failed_indices.add(idx)
     except FileNotFoundError:
         logger.error(f"Log file not found: {log_file_path}")
         return set()
 
     return failed_indices
 
+
 async def process_single_row(graphiti: Graphiti, row: dict, original_index: int):
-    """
-    Process one row with monitoring hooks.
-    """
+    """Process one row."""
     row_json = json.dumps(row, ensure_ascii=False)
     episode_name = row.get('id', str(uuid.uuid4()))
-
-    # Report row processing started to monitor
-    if MONITORING_ENABLED:
-        monitor.update_progress(original_index, episode_name, success=False, error="Processing...")
 
     try:
         await graphiti.add_episode(
@@ -83,16 +67,12 @@ async def process_single_row(graphiti: Graphiti, row: dict, original_index: int)
             source_description=f"CSV Row {original_index} (Retry)",
             reference_time=datetime.now(timezone.utc)
         )
-
-        if MONITORING_ENABLED:
-            monitor.update_progress(original_index, episode_name, success=True)
-        logger.info(f"✅ [Row {original_index}] Retry Success")
+        logger.info(f"OK [Row {original_index}] Retry Success")
         return True
     except Exception as e:
-        if MONITORING_ENABLED:
-            monitor.update_progress(original_index, episode_name, success=False, error=str(e))
-        logger.error(f"❌ [Row {original_index}] Retry Failed: {str(e)}")
+        logger.error(f"X [Row {original_index}] Retry Failed: {str(e)}")
         return False
+
 
 async def main():
     load_dotenv()
@@ -100,8 +80,6 @@ async def main():
     parser = argparse.ArgumentParser(description="Re-ingest failed rows from a previous log.")
     parser.add_argument("csv_file", type=str, help="Path to original CSV file")
     parser.add_argument("log_file", type=str, help="Path to the log file containing failures (prev_run.log)")
-    parser.add_argument("--monitor-url", type=str, default="http://localhost:3456",
-                        help="URL of the monitor server (default: http://localhost:3456)")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv_file):
@@ -125,11 +103,7 @@ async def main():
 
     total_rows = len(retry_list)
 
-    # Report ingestion start to monitor
-    if MONITORING_ENABLED:
-        monitor.start_ingestion(total_rows)
-
-    # 2. Initialize Drivers (Same as ingest.py)
+    # 2. Initialize Drivers
     logger.info("Initializing drivers...")
 
     llm_config = LLMConfig(
@@ -165,7 +139,7 @@ async def main():
         cross_encoder=reranker
     )
 
-    # 4. Synchronous Batch Loop
+    # 3. Synchronous Batch Loop
     batch_limit = int(os.getenv("SEMAPHORE_LIMIT", 2))
     logger.info(f"Starting Retry of {total_rows} rows. Processing {batch_limit} at a time.")
 
@@ -181,21 +155,8 @@ async def main():
         results = await asyncio.gather(*batch_tasks)
         success_count += sum(1 for r in results if r)
 
-        # Calculate batch number
         batch_num = i // batch_limit + 1
-
-        # Report batch completion to monitor
-        if MONITORING_ENABLED:
-            monitor.batch_completed(batch_num)
-
         logger.info(f"--- Batch {batch_num} Done ---")
-
-    # Finalize
-    if MONITORING_ENABLED:
-        monitor.stop_ingestion(
-            success=success_count == total_rows,
-            message=f"RETRY COMPLETE. Success: {success_count} / {total_rows}"
-        )
 
     # Final Summary
     logger.info("=" * 30)
@@ -211,18 +172,6 @@ async def main():
     except:
         pass
 
-    # Report to monitor via API if WebSocket connection failed
-    if MONITORING_ENABLED:
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{args.monitor_url}/api/stop", json={
-                    "success": success_count == total_rows,
-                    "message": f"RETRY COMPLETE. Success: {success_count} / {total_rows}"
-                }) as resp:
-                    pass
-        except:
-            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
