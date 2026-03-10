@@ -13,6 +13,6 @@ if_add_doc_description: "no"
 if_add_node_text: "no"
 
 # Markdown-only parameters
-if_thinning: "no"
-thinning_threshold: 5000
+if_thinning: "yes"
+thinning_threshold: 1000  # Nodes smaller than this get merged with parent
 summary_token_threshold: 200

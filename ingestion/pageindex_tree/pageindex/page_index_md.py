@@ -2,10 +2,14 @@ import asyncio
 import json
 import re
 import os
+import logging
 try:
     from .utils import *
 except:
     from utils import *
+
+logger = logging.getLogger(__name__)
+
 
 async def get_node_summary(node, summary_token_threshold=200, model=None):
     node_text = node.get('text')
@@ -13,19 +17,30 @@ async def get_node_summary(node, summary_token_threshold=200, model=None):
     if num_tokens < summary_token_threshold:
         return node_text
     else:
+        logger.info(f"  Generating summary for '{node.get('title', 'unknown')}' ({num_tokens} tokens)")
         return await generate_node_summary(node, model=model)
 
 
-async def generate_summaries_for_structure_md(structure, summary_token_threshold, model=None):
+async def generate_summaries_for_structure_md(structure, summary_token_threshold, model=None, batch_size=5):
     nodes = structure_to_list(structure)
-    tasks = [get_node_summary(node, summary_token_threshold=summary_token_threshold, model=model) for node in nodes]
-    summaries = await asyncio.gather(*tasks)
-    
-    for node, summary in zip(nodes, summaries):
-        if not node.get('nodes'):
-            node['summary'] = summary
-        else:
-            node['prefix_summary'] = summary
+    total_nodes = len(nodes)
+
+    logger.info(f"Generating summaries for {total_nodes} nodes (batch size: {batch_size})")
+
+    # Process nodes in batches to avoid overwhelming the API
+    for i in range(0, total_nodes, batch_size):
+        batch = nodes[i:i + batch_size]
+        logger.info(f"Processing batch {i // batch_size + 1}: nodes {i+1} to {min(i + batch_size, total_nodes)}")
+        tasks = [get_node_summary(node, summary_token_threshold=summary_token_threshold, model=model) for node in batch]
+        summaries = await asyncio.gather(*tasks)
+
+        for node, summary in zip(batch, summaries):
+            if not node.get('nodes'):
+                node['summary'] = summary
+            else:
+                node['prefix_summary'] = summary
+        logger.info(f"Completed batch: {min(i + batch_size, total_nodes)}/{total_nodes} nodes processed")
+
     return structure
 
 
@@ -241,41 +256,50 @@ def clean_tree_for_output(tree_nodes):
 
 
 async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_add_node_summary='no', summary_token_threshold=None, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes'):
+    logger.info(f"Loading markdown file: {md_path}")
+
     with open(md_path, 'r', encoding='utf-8') as f:
         markdown_content = f.read()
-    
-    print(f"Extracting nodes from markdown...")
-    node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
 
-    print(f"Extracting text content from nodes...")
+    logger.info("Extracting nodes from markdown...")
+    node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
+    logger.info(f"Found {len(node_list)} nodes")
+
+    logger.info("Extracting text content from nodes...")
     nodes_with_content = extract_node_text_content(node_list, markdown_lines)
-    
+    logger.info(f"Extracted text from {len(nodes_with_content)} nodes")
+
     if if_thinning:
+        logger.info(f"Applying tree thinning (threshold: {min_token_threshold} tokens)")
         nodes_with_content = update_node_list_with_text_token_count(nodes_with_content, model=model)
-        print(f"Thinning nodes...")
+        nodes_before = len(nodes_with_content)
         nodes_with_content = tree_thinning_for_index(nodes_with_content, min_token_threshold, model=model)
-    
-    print(f"Building tree from nodes...")
+        nodes_after = len(nodes_with_content)
+        logger.info(f"Thinning complete: {nodes_before} -> {nodes_after} nodes")
+
+    logger.info("Building tree from nodes...")
     tree_structure = build_tree_from_nodes(nodes_with_content)
+    logger.info(f"Tree built with {len(tree_structure)} root nodes")
 
     if if_add_node_id == 'yes':
+        logger.info("Writing node IDs...")
         write_node_id(tree_structure)
 
-    print(f"Formatting tree structure...")
-    
+    logger.info("Formatting tree structure...")
+
     if if_add_node_summary == 'yes':
         # Always include text for summary generation
         tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'text', 'line_num', 'nodes'])
-        
-        print(f"Generating summaries for each node...")
+
+        logger.info("Generating summaries for each node...")
         tree_structure = await generate_summaries_for_structure_md(tree_structure, summary_token_threshold=summary_token_threshold, model=model)
-        
+
         if if_add_node_text == 'no':
             # Remove text after summary generation if not requested
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
-        
+
         if if_add_doc_description == 'yes':
-            print(f"Generating document description...")
+            logger.info("Generating document description...")
             # Create a clean structure without unnecessary fields for description generation
             clean_structure = create_clean_structure_for_description(tree_structure)
             doc_description = generate_doc_description(clean_structure, model=model)
@@ -290,7 +314,8 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_ad
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'text', 'line_num', 'nodes'])
         else:
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
-    
+
+    logger.info("Tree generation complete")
     return {
         'doc_name': os.path.splitext(os.path.basename(md_path))[0],
         'structure': tree_structure,

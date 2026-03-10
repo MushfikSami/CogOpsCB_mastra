@@ -2,12 +2,25 @@ import argparse
 import os
 import json
 import asyncio
+import logging
+from datetime import datetime
 from dotenv import load_dotenv
 
 from pageindex.page_index_md import md_to_tree
 from pageindex.utils import ConfigLoader
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pageindex.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Set environment variables for local vLLM model
 os.environ["OPENAI_BASE_URL"] = os.getenv('OPENAI_BASE_URL', 'http://localhost:5000/v1/')
@@ -16,6 +29,10 @@ os.environ["CHATGPT_API_KEY"] = os.getenv('VLLM_API_KEY', 'no-key')
 
 
 def main():
+    logger.info("=" * 60)
+    logger.info("PageIndex Pipeline Started")
+    logger.info("=" * 60)
+
     parser = argparse.ArgumentParser(
         description='Process Markdown document and generate tree structure'
     )
@@ -92,14 +109,26 @@ def main():
 
     args = parser.parse_args()
 
+    # Log configuration
+    logger.info(f"Input MD Path: {args.md_path}")
+    logger.info(f"Output Directory: {args.output_dir}")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Thinning: {args.if_thinning.lower() == 'yes'}")
+    logger.info(f"Thinning Threshold: {args.thinning_threshold} tokens")
+    logger.info(f"Summary Token Threshold: {args.summary_token_threshold}")
+    logger.info(f"Add Node ID: {args.if_add_node_id}")
+    logger.info(f"Add Node Summary: {args.if_add_node_summary}")
+    logger.info(f"Add Doc Description: {args.if_add_doc_description}")
+    logger.info(f"Add Node Text: {args.if_add_node_text}")
+    logger.info("-" * 60)
+
     # Validate Markdown file
     if not args.md_path.lower().endswith(('.md', '.markdown')):
         raise ValueError("Markdown file must have .md or .markdown extension")
     if not os.path.isfile(args.md_path):
         raise ValueError(f"Markdown file not found: {args.md_path}")
 
-    # Process markdown file
-    print('Processing markdown file...')
+    logger.info(f"Validated markdown file: {args.md_path}")
 
     # Load config with defaults from config.yaml
     config_loader = ConfigLoader()
@@ -115,8 +144,10 @@ def main():
 
     # Load config with defaults from config.yaml
     opt = config_loader.load(user_opt)
+    logger.info("Configuration loaded from config.yaml")
 
     # Run the async md_to_tree function
+    logger.info("Starting tree extraction...")
     toc_with_page_number = asyncio.run(md_to_tree(
         md_path=args.md_path,
         if_thinning=args.if_thinning.lower() == 'yes',
@@ -128,8 +159,9 @@ def main():
         if_add_node_text=opt.if_add_node_text,
         if_add_node_id=opt.if_add_node_id
     ))
+    logger.info("Tree extraction completed")
 
-    print('Parsing done, saving to file...')
+    logger.info("Preparing output file...")
 
     # Save results
     md_name = os.path.splitext(os.path.basename(args.md_path))[0]
@@ -140,7 +172,9 @@ def main():
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(toc_with_page_number, f, indent=2, ensure_ascii=False)
 
-    print(f'Tree structure saved to: {output_file}')
+    logger.info("-" * 60)
+    logger.info(f"SUCCESS: Tree structure saved to: {output_file}")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
