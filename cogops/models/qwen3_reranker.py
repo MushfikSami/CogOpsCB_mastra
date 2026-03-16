@@ -30,16 +30,17 @@ logger = logging.getLogger(__name__)
 
 # --- QWEN3.5 TOKEN CONFIGURATION ---
 # These IDs correspond to the Qwen3.5-35B tokenizer.
-# We include both the word itself and the word with a leading space
-# to handle potential whitespace variations in generation.
-# True:  2434 ("True"), 2912 (" True")
-# False: 3913 ("False"), 3439 (" False")
-QWEN_TRUE_IDS = [2434, 2912]
-QWEN_FALSE_IDS = [3913, 3439]
+# Using binary 1/0 tokens instead of True/False because:
+# - True/False gets interpreted as factual correctness rather than "contains answer"
+# - Binary 1/0 forces the model to treat this as a score classification task
+# Token '1': 16  (answer present)
+# Token '0': 15  (answer not present)
+QWEN_ANSWER_PRESENT_ID = 16  # "1"
+QWEN_ANSWER_ABSENT_ID = 15   # "0"
 
 # Combine them for the bias dictionary.
 # We use a bias of 100 to FORCE the model to pick only these tokens.
-QWEN_LOGIT_BIAS = {tid: 100 for tid in QWEN_TRUE_IDS + QWEN_FALSE_IDS}
+QWEN_LOGIT_BIAS = {QWEN_ANSWER_PRESENT_ID: 100, QWEN_ANSWER_ABSENT_ID: 100}
 
 DEFAULT_MODEL = 'qwen3'  # Placeholder, usually overridden by config
 
@@ -53,25 +54,25 @@ class QwenRerankerClient(OpenAIRerankerClient):
     """
 
     async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
-        # 1. Prepare the messages. 
-        # This block is identical to the original OpenAIRerankerClient.
+        # 1. Prepare the messages.
+        # Using binary 1/0 tokens instead of True/False to avoid the model interpreting
+        # the output as factual correctness. Binary scores treat this as a classification
+        # task: 1 = passage contains the answer, 0 = passage does not contain the answer.
         openai_messages_list: Any = [
             [
                 Message(
                     role='system',
-                    content='You are an expert tasked with determining whether the passage contains the answer to the query',
+                    content='You are an information retrieval assistant. For each passage, determine if it contains the answer to the query. Reply "1" if the passage contains the answer. Reply "0" if the passage does not contain the answer.',
                 ),
                 Message(
                     role='user',
                     content=f"""
-                           Respond with "True" if PASSAGE contains the answer to QUERY and "False" otherwise.
-                           <PASSAGE>
-                           {passage}
-                           </PASSAGE>
-                           <QUERY>
-                           {query}
-                           </QUERY>
-                           """,
+                        Query: {query}
+                        Passage: {passage}
+
+                        Does this passage contain the answer?
+                        Reply ONLY with "1" (yes) or "0" (no).
+                        """,
                 ),
             ]
             for passage in passages
@@ -86,14 +87,15 @@ class QwenRerankerClient(OpenAIRerankerClient):
                         messages=openai_messages,
                         temperature=0,
                         max_tokens=1,
-                        
+
                         # --- CHANGE FROM ORIGINAL ---
                         # Original used OpenAI IDs {'6432': 1, '7983': 1}
-                        # We use Qwen IDs with high bias to force strict True/False output.
+                        # We use Qwen binary 1/0 token IDs with high bias.
+                        # Token 16 = "1" (answer present), Token 15 = "0" (answer absent)
                         logit_bias=QWEN_LOGIT_BIAS,
-                        
+
                         logprobs=True,
-                        # We request 2 logprobs. Since we biased only "True" and "False"
+                        # We request 2 logprobs. Since we biased only "1" and "0"
                         # extremely heavily, these two should always be the top 2.
                         top_logprobs=2,
                     )
@@ -102,7 +104,6 @@ class QwenRerankerClient(OpenAIRerankerClient):
             )
 
             # 3. Extract top logprobs.
-            # Identical structure to original.
             responses_top_logprobs = [
                 response.choices[0].logprobs.content[0].top_logprobs
                 if response.choices[0].logprobs is not None
@@ -112,30 +113,26 @@ class QwenRerankerClient(OpenAIRerankerClient):
             ]
 
             scores: list[float] = []
-            
+
             # 4. Calculate Scores.
-            # Keeps original logic: check if the top token is "True".
+            # For binary classification: 1 = high score (answer present), 0 = low score (answer absent)
             for top_logprobs in responses_top_logprobs:
                 if len(top_logprobs) == 0:
                     scores.append(0.0) # Safety fallback
                     continue
-                
-                # Convert log-probability to linear probability (0.0 to 1.0)
-                norm_logprobs = np.exp(top_logprobs[0].logprob)
-                
-                # Check the text content. 
-                # .strip() handles " True" vs "True".
-                # .lower() handles "True" vs "true".
-                token_text = top_logprobs[0].token.strip().split(' ')[0].lower()
-                
-                if token_text == 'true':
-                    # If model said True, score is the probability of True
-                    scores.append(norm_logprobs)
+
+                # Get the token text and convert logprob to probability
+                token_text = top_logprobs[0].token.strip()
+                logprob = top_logprobs[0].logprob
+                prob = 100 * (2.718281828 ** logprob)  # Convert logprob to percentage
+
+                if token_text == '1':
+                    # Model said "1" (answer present) - use the probability directly
+                    scores.append(prob / 100.0)
                 else:
-                    # If model said False (or anything else), score is (1 - probability)
-                    # This works because if it said "False" with 99% confidence,
-                    # the score becomes 1 - 0.99 = 0.01 (Low relevance).
-                    scores.append(1 - norm_logprobs)
+                    # Model said "0" (answer absent) - score is 1 - probability
+                    # If it said "0" with 99% confidence, score = 1 - 0.99 = 0.01 (low relevance)
+                    scores.append(1 - (prob / 100.0))
 
             # 5. Sort and Return Results.
             results = [(passage, score) for passage, score in zip(passages, scores, strict=True)]

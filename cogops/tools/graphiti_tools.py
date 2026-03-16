@@ -67,7 +67,8 @@ async def get_graphiti_client() -> Graphiti:
         neo4j_driver = Neo4jDriver(
             uri=os.getenv("NEO4J_URI"),
             user=os.getenv("NEO4J_USER"),
-            password=os.getenv("NEO4J_PASSWORD")
+            password=os.getenv("NEO4J_PASSWORD"),
+            database=os.getenv("NEO4J_DATABASE", "neo4j")
         )
 
         _GRAPHITI_CLIENT = Graphiti(

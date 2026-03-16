@@ -40,7 +40,7 @@ def find_token_ids():
     print("Token IDs for True/False and variations:")
     print("=" * 60)
 
-    test_strings = ["True", " True", "False", " False"]
+    test_strings = ["True", " True", "False", " False", "true", " true", "false", " false"]
 
     for text in test_strings:
         token_ids = tokenizer.encode(text, add_special_tokens=False)
