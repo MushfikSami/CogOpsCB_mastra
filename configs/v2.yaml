@@ -22,7 +22,7 @@ conversation:
 # Parameters used by graphiti_tools.py
 graph_search:
   limit: 5             # Maximum number of facts to retrieve from the graph
-  min_score: 0.9      # Minimum similarity score for vector search within the graph
+  min_score: 0.8      # Minimum similarity score for vector search within the graph
 
 # --- Token & Prompt Management ---
 # Controls how the final prompt is assembled in graphiti_agents.py

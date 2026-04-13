@@ -9,6 +9,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 import yaml
 import chromadb
@@ -24,8 +25,10 @@ CONFIG_CONSTANT=os.path.expanduser("~/CogOpsCB/configs/v1.yaml")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_current_time() -> str:
-    """Returns the current server date and time as a formatted string."""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Returns the current Bangladesh Standard Time (BST, UTC+6) as a formatted string."""
+    bst_timezone = ZoneInfo("Asia/Dhaka")
+    current_time = datetime.now(bst_timezone)
+    return current_time.strftime("%Y-%m-%d %H:%M:%S")
 
 async def retrieve_knowledge(query: str) -> List[Dict[str, Any]]:
     """Async tool function to retrieve passages from the knowledge base using VectorRetriever."""
