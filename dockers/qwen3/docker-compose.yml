@@ -1,11 +1,11 @@
 services:
   vllm:
-    image: vllm/vllm-openai:nightly
-    container_name: qwen35-server
+    image: vllm/vllm-openai:latest
+    container_name: qwen3-server
 
     command: >
-      --model cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit
-      --served-model-name qwen35
+      --model cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit
+      --served-model-name qwen36
       --host 0.0.0.0
       --port 8000
       --max-model-len 262144
