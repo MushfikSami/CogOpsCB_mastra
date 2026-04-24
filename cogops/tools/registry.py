@@ -71,6 +71,14 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
         all_schema.extend(s)
         all_map.update(m)
 
+    # --- Wiki fallback tools (pure, no context injection) ---
+    from cogops.tools.wiki import (
+        wikipedia_tools_list as w1,
+        wikipedia_tools_map as w2,
+    )
+    all_schema.extend(w1)
+    all_map.update(w2)
+
     # --- Secondary-LLM tools (need secondary_client/secondary_model) ---
     from cogops.tools.secondary.grep_passage import grep_passage_tools_list as s1, grep_passage_tools_map as s2
     from cogops.tools.secondary.extract_from_doc import extract_tools_list as s3, extract_tools_map as s4

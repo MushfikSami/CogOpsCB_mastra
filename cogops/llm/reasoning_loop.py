@@ -32,6 +32,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from cogops.tools.answer_directly import ANSWER_DIRECTLY_SENTINEL
 
+# Streaming cadence for answer_directly text. The underlying model has
+# already produced the full string synchronously, so we reveal it to the
+# user in small pieces to match the chunk-by-chunk feel of normal answers.
+_DIRECT_STREAM_CHARS_PER_CHUNK = 12
+_DIRECT_STREAM_DELAY_SECONDS = 0.015
+
 RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError, RuntimeError)
 
 _MISSING = object()
@@ -442,11 +448,18 @@ async def stream_with_tool_calls(
                     },
                     "debug",
                 )
-                yield _make_event(
-                    "answer_chunk",
-                    {"content": direct_answer_payload["text"]},
-                    "user",
-                )
+                # Emit the text as small chunks so the UI renders it as a
+                # live stream rather than a single blob.
+                text = direct_answer_payload["text"]
+                step = _DIRECT_STREAM_CHARS_PER_CHUNK
+                for i in range(0, len(text), step):
+                    yield _make_event(
+                        "answer_chunk",
+                        {"content": text[i:i + step]},
+                        "user",
+                    )
+                    if _DIRECT_STREAM_DELAY_SECONDS > 0:
+                        await asyncio.sleep(_DIRECT_STREAM_DELAY_SECONDS)
                 is_last_turn = True
                 yield _make_event("turn_end", {"turn_number": turn_count}, "debug")
                 return

@@ -8,6 +8,9 @@ API_BASE_URL = "http://localhost:9000"
 CHAT_ENDPOINT = f"{API_BASE_URL}/chat/stream"
 CLEAR_ENDPOINT = f"{API_BASE_URL}/session/clear"
 
+# Hardcoded debug secret — matches ADMIN_DEBUG_SECRET in .env
+DEBUG_SECRET = "SuperDebugCoTCB"
+
 # --- Page Setup ---
 st.set_page_config(
     page_title="RAMDOM UI - Government Services Chatbot",
@@ -32,6 +35,10 @@ st.markdown("""
     }
     h1 {
         color: #006a4e;
+    }
+    .stMarkdown pre {
+        white-space: pre-wrap;
+        font-size: 0.85rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -61,13 +68,13 @@ def clear_session():
 
 # --- UI Rendering ---
 
-# 1. Sidebar (Debug & Controls)
+# 1. Sidebar (Controls)
 with st.sidebar:
     st.title("কন্ট্রোল প্যানেল")
     st.markdown(f"**User ID:** `{st.session_state.user_id}`")
     st.markdown("---")
-    st.subheader("Debugging")
-    debug_key = st.text_input("Admin Debug Secret", type="password", help="Enter the secret key to see Reasoning and Tool usage.")
+    st.subheader("Live Debug View")
+    st.caption("Reasoning, tool calls & results are always visible.")
     st.markdown("---")
     if st.button("নতুন করে শুরু করুন (Clear)", type="primary"):
         clear_session()
@@ -107,14 +114,10 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        if debug_key:
-            cot_expander = st.expander("Reasoning", expanded=True)
-            cot_placeholder = cot_expander.empty()
-            tool_expander = st.expander("Tool Logs", expanded=True)
-            tool_placeholder = tool_expander.empty()
-        else:
-            cot_placeholder = None
-            tool_placeholder = None
+        cot_expander = st.expander("Reasoning", expanded=True)
+        cot_placeholder = cot_expander.empty()
+        tool_expander = st.expander("Tool Logs", expanded=True)
+        tool_placeholder = tool_expander.empty()
 
         answer_placeholder = st.empty()
         full_cot = ""
@@ -123,7 +126,7 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         clarification_data = None
 
         payload = {"user_id": st.session_state.user_id, "query": prompt}
-        headers = {"X-Debug-Key": debug_key} if debug_key else {}
+        headers = {"X-Debug-Key": DEBUG_SECRET}
 
         try:
             with requests.post(CHAT_ENDPOINT, json=payload, headers=headers, stream=True) as r:
