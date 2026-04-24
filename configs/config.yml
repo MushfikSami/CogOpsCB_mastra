@@ -1,0 +1,133 @@
+# ===================================================================
+# GovOps Graphiti Agent Configuration
+# ===================================================================
+
+# --- Agent Identity ---
+agent_name: "আশা"
+agent_story: "আমি বাংলাদেশ সরকারের নাগরিকদের সহায়তা করার জন্য ডিজাইন করা একটি ডিজিটাল উদ্যোগ। আমার লক্ষ্য হলো সরকারি সেবা সংক্রান্ত তথ্য আপনার জন্য সহজলভ্য করে তোলা। jiggasha.ai এর মাধ্যমে, আমি আপনাকে বিভিন্ন সরকারি সেবা, নীতিমালা, এবং প্রক্রিয়া সম্পর্কে তথ্য প্রদান করতে পারি। আমি আপনার প্রশ্নের উত্তর দিতে, নির্দেশনা প্রদান করতে, এবং প্রাসঙ্গিক তথ্য খুঁজে পেতে সাহায্য করতে প্রস্তুত। আসুন, একসাথে বাংলাদেশের নাগরিক সেবার উন্নয়নে কাজ করি!"
+
+# --- Primary LLM (Agent Reasoning + Native Thinking) ---
+llm:
+  api_key_env: "LLM_API_KEY"
+  model_name_env: "LLM_MODEL_NAME"
+  base_url_env: "LLM_BASE_URL"
+  max_context_tokens: 32000
+  thinking: true
+
+# --- Reranker LLM (Binary Classification) ---
+reranker:
+  api_key_env: "RERANKER_API_KEY"
+  model_name_env: "RERANKER_MODEL_NAME"
+  base_url_env: "RERANKER_BASE_URL"
+  max_context_tokens: 32000
+
+# --- Secondary LLM (General Tasks, Sub-agents) ---
+secondary:
+  api_key_env: "SECONDARY_API_KEY"
+  model_name_env: "SECONDARY_MODEL_NAME"
+  base_url_env: "SECONDARY_BASE_URL"
+  max_context_tokens: 32000
+
+# --- Embedder (Triton Inference Server) ---
+embedder:
+  url_env: "TRITON_URL"
+  model_name_env: "TRITON_MODEL_NAME"
+  tokenizer_env: "TRITON_TOKENIZER"
+  max_batch_size: 8
+
+# --- Reasoning ---
+reasoning:
+  max_turns: 10
+
+# --- Conversation Management ---
+conversation:
+  history_window: 10  # Number of exchanges to retain in memory
+
+# --- Graphiti Search Configuration ---
+graph_search:
+  limit: 5             # Maximum number of facts to retrieve from the graph
+  min_score: 0.8
+
+# --- Graph Tools Configuration ---
+entity_search:
+  max_results: 10
+entity_detail: {}
+node_explore:
+  max_results: 100
+relation_browse:
+  filter_prefix: null
+  top_n: 100
+relation_filter:
+  max_results: 50
+similar_entities:
+  max_results: 10
+  min_score: 0.5
+path_find:
+  max_hops: 3
+  max_paths: 5
+episodic_search:
+  max_results: 10
+graph_stats:
+  detail_level: "basic"
+
+# --- Secondary Tools ---
+grep_passage:
+  context_lines: 2
+extract_from_document:
+  max_tokens: 2048
+delegate_task:
+  max_tokens: 2048
+spawn_subagent:
+  max_turns: 5
+
+# --- History Query ---
+history_query:
+  default_recent_n: 3
+
+# --- Session / Redis ---
+session:
+  redis_url_env: "REDIS_URL"
+  ttl_seconds_env: "REDIS_SESSION_TTL_SECONDS"
+
+# --- Summarizer ---
+summarizer:
+  max_tokens_env: "SUMMARIZER_MAX_TOKENS"
+
+# --- Token & Prompt Management ---
+token_management:
+  tokenizer_model_env: "TOKENIZER_MODEL_NAME"
+  system_prompt_reservation: 3500  # 16 tools + expanded prompt ~3.5k tokens
+  history_budget: 0.3
+
+# --- LLM Generation Parameters ---
+# Per-mode parameters sent via extra_body to vLLM
+llm_call_parameters:
+  thinking_general:
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+  instruct_general:
+    temperature: 0.7
+    top_p: 0.8
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+  instruct_reasoning:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 40
+    min_p: 0.0
+    presence_penalty: 2.0
+    repetition_penalty: 1.0
+  max_tokens: 2048
+
+# --- UX Response Templates ---
+response_templates:
+  error_fallback: "একটি প্রযুক্তিগত ত্রুটির কারণে আমি এই মুহূর্তে সাহায্য করতে পারছি না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"
+  tool_failure: "দুঃখিত, তথ্যভাণ্ডার থেকে তথ্য সংগ্রহ করতে সমস্যা হচ্ছে। দয়া করে একটু পর আবার জিজ্ঞাসা করুন।"
+  no_info_found: "দুঃখিত, এই বিষয়ে আমার কাছে বর্তমানে কোনো সঠিক সরকারি তথ্য নেই।"
+  safety_violation: "আপনার অনুরোধটি আমাদের নিরাপত্তা নীতিমালার পরিপন্থী। আমি শুধুমাত্র সরকারি সেবা সংক্রান্ত তথ্য প্রদান করতে পারি।"

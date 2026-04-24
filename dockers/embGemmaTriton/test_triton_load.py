@@ -27,27 +27,27 @@ def send_inference_request(triton_client, tokenizer, batch_size, context_length)
     """Sends a single inference request to Triton."""
     # 1. Prepare the text data with random context lengths
     texts = [QUERY_PREFIX + generate_random_text(context_length) for _ in range(batch_size)]
-    
+
     # 2. Tokenize the text
     tokens = tokenizer(
-        texts, 
-        return_tensors='np', 
-        padding='max_length', 
-        truncation=True, 
+        texts,
+        return_tensors='np',
+        padding='max_length',
+        truncation=True,
         max_length=context_length
     )
-    
+
     # 3. Prepare Triton inputs
     input_ids = tokens['input_ids'].astype(np.int64)
     attention_mask = tokens['attention_mask'].astype(np.int64)
-    
+
     inputs = [
         httpclient.InferInput('input_ids', input_ids.shape, "INT64"),
         httpclient.InferInput('attention_mask', attention_mask.shape, "INT64")
     ]
     inputs[0].set_data_from_numpy(input_ids)
     inputs[1].set_data_from_numpy(attention_mask)
-    
+
     # 4. Send the request
     try:
         triton_client.infer(model_name=MODEL_NAME, inputs=inputs)
@@ -64,7 +64,7 @@ def run_load_scenario(config):
     total_requests = num_workers * requests_per_worker
 
     print("\n" + "="*80)
-    print(f"🚀 Starting Load Test Scenario: {config.get('name', 'Unnamed')}")
+    print(f"Starting Load Test Scenario: {config.get('name', 'Unnamed')}")
     print(f"   - Concurrent Workers: {num_workers}")
     print(f"   - Batch Size per Request: {batch_size}")
     print(f"   - Max Context Length: {context_length} tokens")
@@ -77,23 +77,23 @@ def run_load_scenario(config):
 
     success_count = 0
     start_time = time.time()
-    
+
     # Use a ThreadPoolExecutor to send requests concurrently
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [
             executor.submit(send_inference_request, triton_client, tokenizer, batch_size, context_length)
             for _ in range(total_requests)
         ]
-        
+
         # Use tqdm to create a progress bar for the completed requests
         for future in tqdm(as_completed(futures), total=total_requests, desc="Processing Requests"):
             result = future.result()
             if result == "SUCCESS":
                 success_count += 1
-    
+
     end_time = time.time()
     total_time = end_time - start_time
-    
+
     # --- Report Results ---
     print("\n--- Scenario Results ---")
     print(f"  - Total Time Taken: {total_time:.2f} seconds")

@@ -38,14 +38,13 @@ st.markdown("""
 
 # --- Initialize Session State ---
 if "user_id" not in st.session_state:
-    # Generate a random User ID for this browser session
     st.session_state.user_id = str(uuid.uuid4())[:8]
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "আসসালামু আলাইকুম! বাংলাদেশ সরকারের বিভিন্ন সেবা, ফি, এবং নিয়মাবলি সম্পর্কে সঠিক তথ্য দিয়ে আপনাকে সাহায্য করাই আমার কাজ।\n\nআজ আপনাকে কীভাবে সাহায্য করতে পারি?"
+            "content": "আসসালামু আলাইকুম! বাংলাদেশ সরকারের বিভিন্ন সেবা, ফি, এবং নিয়মাবলি সম্পর্কে সঠিক তথ্য দিয়ে আপনাকে সাহায্য করাই আমার কাজ।\n\nআজ আপনাকে কীভাবে সাহায্য করতে পারি?"
         }
     ]
 
@@ -56,9 +55,8 @@ def clear_session():
     try:
         requests.post(CLEAR_ENDPOINT, json={"user_id": st.session_state.user_id})
     except Exception:
-        pass # Ignore connection errors on clear
-    
-    st.session_state.messages = [] # Clear UI
+        pass
+    st.session_state.messages = []
     st.rerun()
 
 # --- UI Rendering ---
@@ -66,13 +64,10 @@ def clear_session():
 # 1. Sidebar (Debug & Controls)
 with st.sidebar:
     st.title("কন্ট্রোল প্যানেল")
-    
     st.markdown(f"**User ID:** `{st.session_state.user_id}`")
-    
     st.markdown("---")
-    st.subheader("🔧 Debugging")
-    debug_key = st.text_input("Admin Debug Secret", type="password", help="Enter the secret key to see CoT and Tool usage.")
-    
+    st.subheader("Debugging")
+    debug_key = st.text_input("Admin Debug Secret", type="password", help="Enter the secret key to see Reasoning and Tool usage.")
     st.markdown("---")
     if st.button("নতুন করে শুরু করুন (Clear)", type="primary"):
         clear_session()
@@ -84,120 +79,124 @@ st.caption("আপনার ব্যক্তিগত সরকারী স�
 # 3. Chat History Render Loop
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        # A. User Message
         if msg["role"] == "user":
             st.markdown(msg["content"])
-        
-        # B. Assistant Message (The 3-Box Layout)
         elif msg["role"] == "assistant":
-            
-            # Box 1: Chain of Thought (Hidden unless debug key was used)
+            if msg.get("clarification_question"):
+                with st.container():
+                    st.warning(msg["clarification_question"])
+                    if msg.get("clarification_options"):
+                        for opt in msg["clarification_options"]:
+                            if st.button(f"→ {opt}", key=f"clarify_{msg.get('turn_id', '')}_{opt}"):
+                                # This button would normally send the user's reply via the API
+                                st.session_state.messages.append({"role": "user", "content": opt})
+                                st.rerun()
             if msg.get("cot_content"):
-                with st.expander("🧠 চিন্তাভাবনা (Reasoning)", expanded=False):
+                with st.expander("Reasoning", expanded=False):
                     st.markdown(msg["cot_content"])
-            
-            # Box 2: Tool Activity (Hidden unless debug key was used)
             if msg.get("tool_content"):
-                with st.expander("🛠️ প্রযুক্তিগত কার্যক্রম (Tool Logs)", expanded=False):
+                with st.expander("Tool Logs", expanded=False):
                     st.markdown(msg["tool_content"])
-            
-            # Box 3: The Actual Answer
             st.markdown(msg["content"])
 
 # 4. Input & Streaming Logic
 if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (যেমন: পাসপোর্ট ফি কত?)..."):
-    
-    # 4a. Add User Message to State
+
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 4b. Stream Assistant Response
     with st.chat_message("assistant"):
-        
-        # Prepare Containers
-        # Only show expanders if we provided a debug key (heuristic)
         if debug_key:
-            cot_expander = st.expander("🧠 চিন্তাভাবনা (Reasoning)", expanded=True)
+            cot_expander = st.expander("Reasoning", expanded=True)
             cot_placeholder = cot_expander.empty()
-            
-            tool_expander = st.expander("🛠️ প্রযুক্তিগত কার্যক্রম (Tool Logs)", expanded=True)
+            tool_expander = st.expander("Tool Logs", expanded=True)
             tool_placeholder = tool_expander.empty()
         else:
             cot_placeholder = None
             tool_placeholder = None
 
         answer_placeholder = st.empty()
-
-        # Buffers
         full_cot = ""
         full_tool_log = ""
         full_response = ""
+        clarification_data = None
 
-        # Prepare Request
-        payload = {
-            "user_id": st.session_state.user_id,
-            "query": prompt
-        }
+        payload = {"user_id": st.session_state.user_id, "query": prompt}
         headers = {"X-Debug-Key": debug_key} if debug_key else {}
 
         try:
             with requests.post(CHAT_ENDPOINT, json=payload, headers=headers, stream=True) as r:
                 r.raise_for_status()
-                
+
                 for line in r.iter_lines():
                     if line:
                         try:
                             event = json.loads(line.decode('utf-8'))
                             evt_type = event.get("type")
 
-                            # --- EVENT: Chain of Thought ---
-                            if evt_type == "debug_log" and "Thinking" in event.get("title", ""):
+                            # --- New event types ---
+                            if evt_type == "reasoning_chunk":
                                 if cot_placeholder:
                                     chunk = event.get("data", "")
-                                    full_cot += f"{chunk}\n\n"
-                                    cot_placeholder.markdown(full_cot)
+                                    full_cot += chunk
+                                    cot_placeholder.markdown(full_cot + "▌")
 
-                            # --- EVENT: Tool Calls & Results ---
-                            elif evt_type == "debug_log" and ("Tool" in event.get("title", "") or "Result" in event.get("title", "")):
+                            elif evt_type == "tool_call":
                                 if tool_placeholder:
-                                    title = event.get("title", "Log")
-                                    data = event.get("data", "")
-                                    
-                                    # Create a nice log entry
-                                    if "Result" in title:
-                                        # Truncate massive JSON for display
-                                        display_data = str(data)[:500] + ("..." if len(str(data)) > 500 else "")
-                                        full_tool_log += f"**✅ {title}:**\n```\n{display_data}\n```\n"
-                                    else:
-                                        full_tool_log += f"**⚡ {title}:** `{data}`\n\n"
-                                        
+                                    tc = event.get("tool_calls", [])
+                                    full_tool_log += f"**🔧 Tool Call (turn {event.get('turn', '?')}):** `{tc[0]['function']['name']}`\n"
                                     tool_placeholder.markdown(full_tool_log)
 
-                            # --- EVENT: Final Answer Text ---
+                            elif evt_type == "tool_result":
+                                if tool_placeholder:
+                                    content = event.get("content", "")
+                                    full_tool_log += f"**✅ Tool Result:**\n```\n{str(content)[:400]}{'...' if len(str(content)) > 400 else ''}\n```\n\n"
+                                    tool_placeholder.markdown(full_tool_log)
+
+                            elif evt_type == "clarification_needed":
+                                clarification_data = {
+                                    "question": event.get("question", ""),
+                                    "options": event.get("options", []),
+                                    "reason": event.get("reason", ""),
+                                    "turn_id": event.get("turn_id", ""),
+                                }
+                                st.warning(clarification_data["question"])
+                                if clarification_data["options"]:
+                                    for opt in clarification_data["options"]:
+                                        if st.button(f"→ {opt}", key=f"clarify_{clarification_data['turn_id']}_{opt}"):
+                                            st.session_state.messages.append({
+                                                "role": "user",
+                                                "content": opt,
+                                            })
+                                            st.rerun()
+                                break  # Stream ends on clarification
+
+                            # --- Existing event types ---
                             elif evt_type == "answer_chunk":
                                 full_response += event.get("content", "")
                                 answer_placeholder.markdown(full_response + "▌")
-                            
-                            # --- EVENT: Error ---
+
                             elif evt_type == "error":
-                                full_response += f"\n\n🚨 *System Error: {event.get('content')}*"
+                                full_response += f"\n\nSystem Error: {event.get('content')}"
                                 answer_placeholder.markdown(full_response)
 
                         except json.JSONDecodeError:
                             pass
 
-            # Final render to remove cursor
             answer_placeholder.markdown(full_response)
 
-            # 4c. Save to History
-            # We save the debug logs too, so if the user scrolls up, they persist
-            st.session_state.messages.append({
+            msg_entry = {
                 "role": "assistant",
                 "content": full_response,
                 "cot_content": full_cot if full_cot else None,
-                "tool_content": full_tool_log if full_tool_log else None
-            })
+                "tool_content": full_tool_log if full_tool_log else None,
+            }
+            if clarification_data:
+                msg_entry["clarification_question"] = clarification_data["question"]
+                msg_entry["clarification_options"] = clarification_data["options"]
+                msg_entry["turn_id"] = clarification_data.get("turn_id", "")
+            st.session_state.messages.append(msg_entry)
 
         except Exception as e:
             st.error(f"সার্ভারের সাথে সংযোগ স্থাপন করা যাচ্ছে না। (Error: {e})")

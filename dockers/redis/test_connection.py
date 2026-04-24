@@ -15,7 +15,7 @@ try:
     response = r.ping()
 
     if response:
-        print("\n✅ Connection successful!")
+        print("\nConnection successful!")
         print(f"   Server PING response: {response}")
 
         # Perform a basic SET and GET to verify full functionality
@@ -27,16 +27,16 @@ try:
         print(f"   - GET key 'dev_test_key' and received value: '{value}'")
 
         if value == 'it_works!':
-            print("\n✅ All operations completed successfully! Your Redis instance is ready.")
+            print("\nAll operations completed successfully! Your Redis instance is ready.")
         else:
-            print("\n❌ GET operation returned an unexpected value.")
+            print("\nGET operation returned an unexpected value.")
 
     else:
-        print("\n❌ Connection appeared to succeed, but PING failed.")
+        print("\nConnection appeared to succeed, but PING failed.")
 
 except redis.exceptions.ConnectionError as e:
-    print("\n❌ Connection Failed. Check the following:")
+    print("\nConnection Failed. Check the following:")
     print("   1. Is the Docker container running and healthy? (Check with 'docker compose ps')")
     print(f"   Error details: {e}")
 except Exception as e:
-    print(f"\n❌ An unexpected error occurred: {e}")
+    print(f"\nAn unexpected error occurred: {e}")

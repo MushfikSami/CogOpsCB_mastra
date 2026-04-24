@@ -16,8 +16,9 @@ from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.llm_client.config import LLMConfig
 
-from cogops.models.triton_embedder import TritonEmbedder, TritonEmbedderConfig
-from cogops.models.qwen3_reranker import QwenRerankerClient
+from openai import AsyncOpenAI
+from cogops.models.embedder import TritonEmbedder, TritonEmbedderConfig
+from cogops.models.reranker import QwenRerankerClient
 
 # ==========================================
 # LOGGING SETUP
@@ -107,9 +108,9 @@ async def main():
     logger.info("Initializing drivers...")
 
     llm_config = LLMConfig(
-        api_key=os.getenv("VLLM_API_KEY", "sk-placeholder"),
-        base_url=os.getenv("VLLM_BASE_URL"),
-        model=os.getenv("VLLM_MODEL_NAME"),
+        api_key=os.getenv("LLM_API_KEY", "sk-placeholder"),
+        base_url=os.getenv("LLM_BASE_URL"),
+        model=os.getenv("LLM_MODEL_NAME"),
         max_tokens=150000
     )
     llm_client = OpenAIGenericClient(config=llm_config)
@@ -123,7 +124,17 @@ async def main():
     )
     embedder = TritonEmbedder(config=triton_conf)
 
-    reranker = QwenRerankerClient(client=llm_client, config=llm_config)
+    reranker_llm_config = LLMConfig(
+        api_key=os.getenv("RERANKER_API_KEY", "sk-placeholder"),
+        base_url=os.getenv("RERANKER_BASE_URL"),
+        model=os.getenv("RERANKER_MODEL_NAME"),
+        max_tokens=1
+    )
+    reranker_client = AsyncOpenAI(
+        api_key=os.getenv("RERANKER_API_KEY", "sk-placeholder"),
+        base_url=os.getenv("RERANKER_BASE_URL")
+    )
+    reranker = QwenRerankerClient(client=reranker_client, config=reranker_llm_config)
 
     neo4j_driver = Neo4jDriver(
         uri=os.getenv("NEO4J_URI"),

@@ -273,6 +273,6 @@ pip install tritonclient[http] onnxruntime-gpu transformers torch numpy nvidia-m
 python verify_model.py
 ```
 
-This should confirm the Triton deployment matches the local ONNX inference. 
-If issues persist, check Triton logs with `docker logs -f embgemmatriton`. 
+This should confirm the Triton deployment matches the local ONNX inference.
+If issues persist, check Triton logs with `docker logs -f embgemmatriton`.
 If GPU memory varies, test with consistent input sizes (e.g., always pad to 512 tokens).

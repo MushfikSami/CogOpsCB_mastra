@@ -27,7 +27,7 @@ def validate_embeddings(name, onnx_embedding, triton_embedding):
     similarities = cosine_similarity(onnx_embedding, triton_embedding)
     min_similarity = np.min(similarities)
     is_similar = min_similarity > 0.999
-    status = "✅ SUCCESS" if is_similar else "❌ FAILURE"
+    status = "SUCCESS" if is_similar else "FAILURE"
     print(f"{status}: Minimum Cosine Similarity is {min_similarity:.6f}.")
     if is_similar:
         print("   - The ONNX model in Triton is functionally identical to the local ONNX model.")
@@ -72,23 +72,23 @@ def main():
         triton_q1_emb = get_triton_embedding(triton_client, query1_tokens)
         if not validate_embeddings("Query (Batch=1, FP32)", onnx_q1_emb, triton_q1_emb):
             all_passed = False
-        
+
         query8_text = [PREFIXES['query'] + "what is the best embedding model?"] * 8
         query8_tokens = tokenizer(query8_text, return_tensors='np', padding=True)
         onnx_q8_emb = get_onnx_embedding(ort_session, query8_tokens)
         triton_q8_emb = get_triton_embedding(triton_client, query8_tokens)
         if not validate_embeddings("Query (Batch=8, FP32)", onnx_q8_emb, triton_q8_emb):
             all_passed = False
-    
+
     except Exception as e:
         print(f"\nAn error occurred during inference: {e}")
         all_passed = False
 
     print("\n\n--- FINAL PRODUCTION VALIDATION ---")
     if all_passed:
-        print("🎉🎉🎉 ALL FP32 MODELS ARE VALIDATED FOR PRODUCTION USE! 🎉🎉🎉")
+        print("ALL FP32 MODELS ARE VALIDATED FOR PRODUCTION USE!")
     else:
-        print("🔥🔥🔥 One or more models failed the functional similarity test. 🔥🔥🔥")
+        print("One or more models failed the functional similarity test.")
 
 
 if __name__ == "__main__":
