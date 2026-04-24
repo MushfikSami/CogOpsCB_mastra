@@ -54,12 +54,17 @@ class TritonEmbedder(EmbedderClient):
             return embedding
         return embedding
 
-    async def create(self, input_data: str | list[str]) -> list[float] | list[list[float]]:
-        """Create embedding(s) for the given input."""
+    async def create(self, input_data: str | list[str]) -> list[float]:
+        """Create embedding for the given input.
+
+        Matches the EmbedderClient ABC contract: always returns list[float]
+        (the first embedding). For a list input, extracts the first embedding.
+        """
         if isinstance(input_data, str):
             return self._embed_text(input_data)
         elif isinstance(input_data, list):
-            return await self.create_batch(input_data)
+            batch = await self.create_batch(input_data)
+            return batch[0]  # ABC contract: return first embedding as list[float]
         raise ValueError(f"Unsupported input type: {type(input_data)}")
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:

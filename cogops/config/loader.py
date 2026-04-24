@@ -27,6 +27,30 @@ def load_config(config_path: str = "configs/config.yml") -> dict:
         raise
 
 
+def get_tool_config(config: dict, tool_name: str) -> dict:
+    """
+    Get tool configuration with unified key support.
+
+    Tries graphiti.<tool_name> first, falls back to flat <tool_name> key
+    for backward compatibility.
+    """
+    # Try unified graphiti key first
+    graphiti = config.get('graphiti', {})
+    if tool_name in graphiti:
+        return graphiti[tool_name]
+    # Try flat key for backward compat
+    if tool_name in config:
+        return config[tool_name]
+    # Try graphiti.search for search-specific tool
+    if tool_name == 'graph_search':
+        return graphiti.get('search', {})
+    # Try secondary section
+    secondary = config.get('secondary', {})
+    if tool_name in secondary:
+        return secondary[tool_name]
+    return {}
+
+
 def _load_endpoint_config(config: dict, section_name: str) -> 'EndpointConfig':
     """Load an EndpointConfig from a config dict section."""
     sec = config.get(section_name, {})

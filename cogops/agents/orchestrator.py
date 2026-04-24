@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
+    _cached_system_prompt: Optional[str] = None
+
     def __init__(self, config_path: str = "configs/config.yml"):
         logger.info("Initializing GovOps Orchestrator...")
         self.config = self._load_config(config_path)
@@ -58,11 +60,15 @@ class Orchestrator:
         self.tools_desc_str = json.dumps(self.tools_schema, indent=2, ensure_ascii=False)
 
         # --- System Prompt ---
-        self.system_prompt = get_graph_prompt(
-            agent_name=self.agent_name,
-            agent_story=self.agent_story,
-            tools_description=self.tools_desc_str,
-        )
+        # Built once per class (immutable, identical for all users).
+        # Each instance references the same string — no per-user allocation.
+        if Orchestrator._cached_system_prompt is None:
+            Orchestrator._cached_system_prompt = get_graph_prompt(
+                agent_name=self.agent_name,
+                agent_story=self.agent_story,
+                tools_description=self.tools_desc_str,
+            )
+        self.system_prompt = Orchestrator._cached_system_prompt
 
         # --- Feedback storage ---
         self.feedback_history: List[Dict[str, Any]] = []  # recent negative feedback
@@ -109,9 +115,12 @@ class Orchestrator:
         """
         Main pipeline:
         1. Build messages: [system_prompt, rolling_summary_delta, user_query]
-        2. Handle clarification reply if pending
+        2. Handle clarification reply if pending (stored temporarily in Redis)
         3. Run reasoning loop
         4. Buffer answer, update Redis (store turn + re-summarize)
+
+        Clarification state is stored in Redis with a TTL (default 1 day).
+        If the user doesn't reply, the key expires automatically — no cleanup needed.
         """
         logger.info(f"Processing Query: {user_query}")
 

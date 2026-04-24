@@ -43,42 +43,42 @@ reasoning:
 conversation:
   history_window: 10  # Number of exchanges to retain in memory
 
-# --- Graphiti Search Configuration ---
-graph_search:
-  limit: 5             # Maximum number of facts to retrieve from the graph
-  min_score: 0.8
-
-# --- Graph Tools Configuration ---
-entity_search:
-  max_results: 10
-entity_detail: {}
-node_explore:
-  max_results: 100
-relation_browse:
-  filter_prefix: null
-  top_n: 100
-relation_filter:
-  max_results: 50
-similar_entities:
-  max_results: 10
-  min_score: 0.5
-path_find:
-  max_hops: 3
-  max_paths: 5
-episodic_search:
-  max_results: 10
-graph_stats:
-  detail_level: "basic"
+# --- Graphiti Unified Configuration ---
+graphiti:
+  search:
+    limit: 5
+    min_score: 0.8
+  entity_search:
+    max_results: 10
+  entity_detail: {}
+  node_explore:
+    max_results: 100
+  relation_browse:
+    filter_prefix: null
+    top_n: 100
+  relation_filter:
+    max_results: 50
+  similar_entities:
+    max_results: 10
+    min_score: 0.5
+  path_find:
+    max_hops: 3
+    max_paths: 5
+  episodic_search:
+    max_results: 10
+  graph_stats:
+    detail_level: "basic"
 
 # --- Secondary Tools ---
-grep_passage:
-  context_lines: 2
-extract_from_document:
-  max_tokens: 2048
-delegate_task:
-  max_tokens: 2048
-spawn_subagent:
-  max_turns: 5
+secondary:
+  grep_passage:
+    context_lines: 2
+  extract_from_document:
+    max_tokens: 2048
+  delegate_task:
+    max_tokens: 2048
+  spawn_subagent:
+    max_turns: 5
 
 # --- History Query ---
 history_query:

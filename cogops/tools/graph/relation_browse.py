@@ -7,6 +7,12 @@ List ALL available relation-name values with their edge counts.
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,9 @@ async def relation_browse(filter_prefix=None, top_n: int = 100) -> str:
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'relation_browse')
+    top_n = top_n or cfg.get('top_n', 100)
+    filter_prefix = filter_prefix or cfg.get('filter_prefix')
 
     md = "## Available Relation Types\n\n"
     md += "| # | Relation Name | Edge Count |\n"

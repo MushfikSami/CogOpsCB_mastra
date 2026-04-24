@@ -7,6 +7,12 @@ Get full details of a specific entity by exact name or UUID.
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 

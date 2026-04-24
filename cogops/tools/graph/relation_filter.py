@@ -7,6 +7,12 @@ Given a relation name, return ALL entity pairs connected by it.
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,8 @@ async def relation_filter(relation_name: str, max_results: int = 50) -> str:
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'relation_filter')
+    max_results = max_results or cfg.get('max_results', 50)
 
     md = f"## {relation_name} Relationships\n\n"
 

@@ -7,6 +7,12 @@ Get graph-level statistics: node counts, relation type distribution, degree dist
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,8 @@ async def graph_stats(detail_level: str = "basic") -> str:
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'graph_stats')
+    detail_level = detail_level or cfg.get('detail_level', 'basic')
 
     md = "## Graph Statistics\n\n"
 

@@ -13,7 +13,7 @@ from ast import literal_eval
 from dotenv import load_dotenv
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_CROSS_ENCODER
 
-from cogops.config.loader import load_config
+from cogops.config.loader import load_config, get_tool_config
 from cogops.graph.client import get_graphiti_client
 
 load_dotenv()
@@ -36,7 +36,7 @@ async def graph_search(query: str) -> str:
     """
     client = await get_graphiti_client()
     search_config = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
-    search_config_params = CONFIG.get('graph_search', {})
+    search_config_params = get_tool_config(CONFIG, 'graph_search')
     limit = search_config_params.get('limit', 5)
     reranker_thresh = search_config_params.get('min_score', '0.9')
 

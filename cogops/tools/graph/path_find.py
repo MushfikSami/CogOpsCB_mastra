@@ -7,6 +7,12 @@ Find paths between two entities (1-N hops).
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,9 @@ async def path_find(start_entity: str, end_entity: str, max_hops: int = 3, max_p
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'path_find')
+    max_hops = max_hops or cfg.get('max_hops', 3)
+    max_paths = max_paths or cfg.get('max_paths', 5)
 
     md = f"## Paths from '{start_entity}' to '{end_entity}'\n\n"
 

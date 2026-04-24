@@ -7,6 +7,12 @@ Given an entity name, return ALL connections (incoming + outgoing).
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,12 +21,14 @@ async def node_explore(entity_name: str, max_results: int = 100) -> str:
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'node_explore')
+    max_results = max_results or cfg.get('max_results', 100)
 
     md = f"## Connections for '{entity_name}'\n\n"
 
     async with driver.session(database="qwen34neo4j") as session:
         result = await session.run(
-            "MATCH (e:Entity {name: $name})-[]-(neighbor:Entity) "
+            "MATCH (e:Entity {name: $name})-[r:RELATES_TO]-(neighbor:Entity) "
             "RETURN e.name AS entity, neighbor.name AS other_entity, "
             "r.name AS relation_type, r.fact AS fact "
             "ORDER BY r.name, other_entity "

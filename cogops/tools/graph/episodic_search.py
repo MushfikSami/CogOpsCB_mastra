@@ -7,6 +7,12 @@ Search raw passage data in Episodic nodes by text content or metadata fields.
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,8 @@ async def episodic_search(search_term: str, field: str = "text", max_results: in
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'episodic_search')
+    max_results = max_results or cfg.get('max_results', 10)
 
     md = f"## Episodic Search: '{search_term}' (field: {field})\n\n"
 

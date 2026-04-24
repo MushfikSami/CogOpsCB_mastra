@@ -7,6 +7,12 @@ Given an entity name, find semantically similar entities via vector cosine simil
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,14 +21,20 @@ async def similar_entities(entity_name: str, max_results: int = 10, min_score: f
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'similar_entities')
+    max_results = max_results or cfg.get('max_results', 10)
+    min_score = min_score or cfg.get('min_score', 0.5)
 
     md = f"## Similar Entities to '{entity_name}'\n\n"
 
     async with driver.session(database="qwen34neo4j") as session:
         result = await session.run(
-            "MATCH (target:Entity {name: $name}) RETURN target.name_embedding AS vec, target.uuid AS exclude "
-            "WITH vec, exclude LIMIT 1 "
-            "MATCH (n:Entity) WHERE n.uuid <> exclude "
+            "MATCH (target:Entity {name: $name}) "
+            "WITH target.name_embedding AS vec, target.uuid AS exclude "
+            "LIMIT 1 "
+            "UNWIND [1] AS _ "
+            "MATCH (n:Entity) "
+            "WHERE n.uuid <> exclude AND n.name_embedding IS NOT NULL "
             "WITH n, vector.similarity.cosine(n.name_embedding, vec) AS score "
             "WHERE score >= $minScore "
             "RETURN n.name, n.summary, score "

@@ -7,6 +7,12 @@ Find entities by partial/fuzzy name match, ranked by match quality.
 import logging
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+from cogops.config.loader import load_config, get_tool_config
+
+load_dotenv()
+CONFIG = load_config()
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,6 +21,8 @@ async def entity_search(search_term: str, max_results: int = 10) -> str:
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
     driver = client.driver
+    cfg = get_tool_config(CONFIG, 'entity_search')
+    max_results = max_results or cfg.get('max_results', 10)
 
     md = f"## Entity Search Results for '{search_term}'\n\n"
 
