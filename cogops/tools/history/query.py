@@ -147,7 +147,16 @@ history_query_tools_list = [
         "type": "function",
         "function": {
             "name": "history_query",
-            "description": "Search or retrieve conversation history. Modes: lookup (substring search), summarize (return rolling summary), recent (last N turns), ask (LLM answer from history).",
+            "description": (
+                "Query conversation history. Call this BEFORE any information tool "
+                "if the user's message is short, numeric, or refers to a previous "
+                "list (e.g. '3', 'the second one', 'tell me more', 'what about that'). "
+                "Also call it when the user explicitly asks about earlier turns. "
+                "Modes: 'recent' = last N turns verbatim (best for resolving "
+                "ambiguous follow-ups), 'lookup' = substring search, "
+                "'summarize' = rolling summary, 'ask' = the secondary LLM answers "
+                "a question using the full history."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

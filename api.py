@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing import Dict, Optional
 from fastapi import Header
 from dotenv import load_dotenv
-from cogops.agents.orchestrator import GraphitiAgent
+from cogops.agents.orchestrator import Orchestrator
 
 from cogops.events.channels import filter_for_user, filter_for_debug
 from cogops.session.query_log import QueryLog
@@ -45,7 +45,7 @@ app.add_middleware(
 )
 
 # --- Session Store ---
-active_sessions: Dict[str, GraphitiAgent] = {}
+active_sessions: Dict[str, Orchestrator] = {}
 session_lock = asyncio.Lock()
 
 # --- Request Models ---
@@ -64,13 +64,13 @@ class FeedbackRequest(BaseModel):
 
 # --- Helper Functions ---
 
-async def get_agent_session(user_id: str) -> GraphitiAgent:
+async def get_agent_session(user_id: str) -> Orchestrator:
     """Thread-safe retrieval or creation of an agent session."""
     async with session_lock:
         if user_id not in active_sessions:
             logger.info(f"Creating new session for User: {user_id}")
             try:
-                agent = GraphitiAgent(config_path=AGENT_CONFIG_PATH)
+                agent = Orchestrator(config_path=AGENT_CONFIG_PATH)
                 active_sessions[user_id] = agent
             except Exception as e:
                 logger.error(f"Failed to create agent session: {e}")
@@ -116,7 +116,7 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = Header(
 
     async def event_generator():
         try:
-            async for event in agent.process_query(request.query, debug_mode=debug_mode):
+            async for event in agent.process_query(request.query, debug_mode=debug_mode, user_id=request.user_id):
                 # Filter events based on debug mode
                 if debug_mode:
                     # Include debug + both events (exclude user-only)

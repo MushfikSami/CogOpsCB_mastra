@@ -112,6 +112,25 @@ class RedisSessionStore:
         key = self._key(user_id, "clarification")
         self._client.delete(key)
 
+    # --- Last assistant reply (for resolving short follow-ups like "3") ---
+    def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
+        """Store the most recent assistant reply + any enumerated options it offered.
+
+        meta = {"assistant_text": str, "options": list[str], "turn_id": str}
+        """
+        if not self.available:
+            return
+        key = self._key(user_id, "last_assistant")
+        self._client.set(key, json.dumps(meta))
+        self._client.expire(key, self.ttl)
+
+    def get_last_assistant_meta(self, user_id: str) -> Optional[dict]:
+        if not self.available:
+            return None
+        key = self._key(user_id, "last_assistant")
+        raw = self._client.get(key)
+        return json.loads(raw) if raw else None
+
     # --- Cleanup ---
     def clear_all(self, user_id: str) -> None:
         if not self.available:

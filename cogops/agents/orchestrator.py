@@ -2,33 +2,62 @@
 cogops/agents/orchestrator.py
 
 The Orchestrator for the GovOps Agent.
-Loads config, builds tool registry, initializes LLM/Graphiti, creates rolling summary in Redis.
-process_query() delegates to run_reasoning_loop and handles clarification/history/feedback.
+
+- Loads config, builds tool registry + system prompt.
+- Per-request: binds tools with a ToolContext, handles pending clarifications,
+  handles short ambiguous follow-ups, truncates messages to the token budget,
+  runs the reasoning loop, persists turn + last-assistant meta to Redis,
+  kicks off the async summarizer.
 """
 
 import os
 import json
 import asyncio
 import logging
+import re
 import uuid
-import yaml
 from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
 
+import yaml
 from dotenv import load_dotenv
 
-from cogops.config.loader import _load_endpoint_config, load_config
+from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
 from cogops.prompts.system import get_graph_prompt
 from cogops.session.redis_store import RedisSessionStore
 from cogops.session.summarizer import run_summarizer_task
-from cogops.tools.registry import build_tool_registry
+from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
 from cogops.tools.ask_user import ClarificationRequested
 from cogops.utils.tokenizer import Tokenizer
+from cogops.utils.truncate import truncate_messages_to_budget
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+_SHORT_FOLLOWUP_MAX_CHARS = 16
+
+
+def _is_short_followup(text: str) -> bool:
+    s = text.strip()
+    if not s:
+        return False
+    if len(s) <= _SHORT_FOLLOWUP_MAX_CHARS:
+        return True
+    # Also catch patterns like "number 3", "option 2", "the second one".
+    low = s.lower()
+    if any(kw in low for kw in ("second one", "third one", "first one", "last one",
+                                "tell me more", "more details", "that one")):
+        return True
+    return bool(re.fullmatch(r"\d+[.)\s]*", s))
+
+
+def _format_options(options: List[str]) -> str:
+    if not options:
+        return ""
+    return "\n".join(f"- {o}" for o in options)
 
 
 class Orchestrator:
@@ -39,29 +68,21 @@ class Orchestrator:
         self.config = self._load_config(config_path)
         self._load_llm_call_config()
 
-        # --- Identity ---
         self.agent_name = self.config.get('agent_name', 'Gov Assistant')
         self.agent_story = self.config.get('agent_story', '')
 
-        # --- LLM Service ---
         self.llm_service = self._initialize_llm()
 
-        # --- Session & Redis ---
         session_config = self.config.get('session', {})
-        redis_url = os.getenv(session_config.get('redis_url_env', 'REDIS_URL'), "redis://localhost:6379/0")
-        ttl = int(os.getenv(session_config.get('ttl_seconds_env', 'REDIS_SESSION_TTL_SECONDS'), '86400'))
+        redis_url = os.getenv(session_config.get('redis_url_env', 'REDIS_URL'),
+                              "redis://localhost:6379/0")
+        ttl = int(os.getenv(session_config.get('ttl_seconds_env', 'REDIS_SESSION_TTL_SECONDS'),
+                            '86400'))
         self.redis_store = RedisSessionStore(url=redis_url, ttl_seconds=ttl)
 
-        # --- Tool Registry ---
-        self.tools_schema, self.tool_map = build_tool_registry(
-            secondary_client=self.llm_service.client_secondary,
-            secondary_model=self.llm_service.llm_config.model if self.llm_service.llm_config else "",
-        )
+        self.tools_schema, self.raw_tool_map = build_tool_registry()
         self.tools_desc_str = json.dumps(self.tools_schema, indent=2, ensure_ascii=False)
 
-        # --- System Prompt ---
-        # Built once per class (immutable, identical for all users).
-        # Each instance references the same string — no per-user allocation.
         if Orchestrator._cached_system_prompt is None:
             Orchestrator._cached_system_prompt = get_graph_prompt(
                 agent_name=self.agent_name,
@@ -70,17 +91,25 @@ class Orchestrator:
             )
         self.system_prompt = Orchestrator._cached_system_prompt
 
-        # --- Feedback storage ---
-        self.feedback_history: List[Dict[str, Any]] = []  # recent negative feedback
-
-        # --- History ---
+        self.feedback_history: List[Dict[str, Any]] = []
         self.history: List[Tuple[str, str]] = []
 
-        # --- Tokenizer ---
-        tm_config = self.config['token_management']
-        self.tokenizer = Tokenizer(
-            model_name=os.getenv(tm_config['tokenizer_model_env'], "Qwen/Qwen2.5-32B-Instruct"),
-        )
+        # Shared tokenizer: used both for active context truncation AND for the
+        # post-tool refine threshold check in the reasoning loop.
+        tm_config = self.config.get('token_management', {})
+        self._tokenizer_model_name = os.getenv(
+            tm_config.get('tokenizer_model_env', 'TOKENIZER_MODEL_NAME'),
+            "",
+        ) or tm_config.get('tokenizer_model_default', '') \
+             or os.getenv('LLM_MODEL_NAME', '') \
+             or "Qwen/Qwen2.5-32B-Instruct"
+        self.tokenizer = Tokenizer(model_name=self._tokenizer_model_name)
+
+        self.system_prompt_reservation = int(tm_config.get('system_prompt_reservation', 3500))
+
+        refine_cfg = self.config.get('post_tool_refine', {})
+        self.post_refine_enabled = bool(refine_cfg.get('enabled', True))
+        self.post_refine_threshold = int(refine_cfg.get('threshold_tokens', 600))
 
         logger.info("GovOps Orchestrator Ready.")
 
@@ -94,10 +123,11 @@ class Orchestrator:
 
     def _load_llm_call_config(self):
         self.llm_call_config = self.config.get('llm_call_parameters', {})
-        self.response_templates = self.config['response_templates']
+        self.response_templates = self.config.get('response_templates', {})
         self.max_turns = self.config.get('reasoning', {}).get('max_turns', 10)
         self.summarizer_max_tokens = int(os.getenv(
-            self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'), '300'
+            self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'),
+            '300',
         ))
 
     def _initialize_llm(self) -> AsyncLLMService:
@@ -110,59 +140,114 @@ class Orchestrator:
             config_secondary=config_secondary,
         )
 
-    async def process_query(self, user_query: str, debug_mode: bool = False,
-                            user_id: Optional[str] = None) -> AsyncGenerator[Dict[str, Any], None]:
+    def _build_tool_context(self, user_id: Optional[str]) -> ToolContext:
+        return ToolContext(
+            user_id=user_id,
+            store=self.redis_store,
+            secondary_client=self.llm_service.client_secondary,
+            secondary_model=(self.llm_service.llm_config.model
+                             if self.llm_service.llm_config else ""),
+            tool_map=self.raw_tool_map,
+            tools_schema=self.tools_schema,
+        )
+
+    async def process_query(
+        self,
+        user_query: str,
+        debug_mode: bool = False,  # kept for API compatibility; filtering is in api.py
+        user_id: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main pipeline:
-        1. Build messages: [system_prompt, rolling_summary_delta, user_query]
-        2. Handle clarification reply if pending (stored temporarily in Redis)
-        3. Run reasoning loop
-        4. Buffer answer, update Redis (store turn + re-summarize)
-
-        Clarification state is stored in Redis with a TTL (default 1 day).
-        If the user doesn't reply, the key expires automatically — no cleanup needed.
+        1. If a clarification is pending, replay the question + options
+           alongside the user reply.
+        2. If the message is short/numeric and the user has a prior assistant
+           reply stored, inject that reply as context so the model can resolve
+           the reference (e.g. "3" -> third item in the list).
+        3. Build [system + rolling summary, user_query], truncate to token
+           budget, run the reasoning loop with a per-request bound tool map.
+        4. Stream events; persist turn + last-assistant-meta; trigger
+           summarizer in the background.
         """
         logger.info(f"Processing Query: {user_query}")
+        original_user_query = user_query
 
         try:
-            # Check for pending clarification reply
-            clarification_reply = None
+            # --- Follow-up / clarification resolution --------------------
+            clarification_replay = None
             if user_id and self.redis_store.available:
                 pending = self.redis_store.get_clarification(user_id)
                 if pending:
-                    clarification_reply = pending
+                    clarification_replay = pending
                     self.redis_store.clear_clarification(user_id)
-                    # Inject clarification Q+A into history
-                    self.history.append((pending['question'], user_query))
-                    # Start fresh reasoning with clarification context
-                    user_query = f"Clarification reply: {user_query}. Context from previous turn:\n{pending['question']}"
+                    self.history.append((pending.get('question', ''), user_query))
+                    opts = _format_options(pending.get('options', []))
+                    user_query = (
+                        f"Previous question: {pending.get('question', '')}\n"
+                        + (f"Previous options:\n{opts}\n" if opts else "")
+                        + f"\nUser reply: {original_user_query}\n\n"
+                          f"Resolve which option the user meant (by number, keyword, "
+                          f"or position) and proceed. Then call the appropriate tool."
+                    )
+                elif _is_short_followup(original_user_query):
+                    last = self.redis_store.get_last_assistant_meta(user_id)
+                    if last and last.get('assistant_text'):
+                        opts = _format_options(last.get('options') or [])
+                        user_query = (
+                            f"Previous assistant reply (for context):\n"
+                            f"{last['assistant_text']}\n"
+                            + (f"\nEnumerated options:\n{opts}\n" if opts else "")
+                            + f"\nUser follow-up: {original_user_query}\n\n"
+                              f"If this follow-up refers to an item in the previous "
+                              f"reply, resolve it first (call history_query "
+                              f"mode='recent' n=2 if you need more context), then "
+                              f"call the appropriate information tool."
+                        )
 
-            # Build messages
+            # --- Build messages -----------------------------------------
             summary = ""
             if user_id and self.redis_store.available:
                 summary = self.redis_store.get_summary(user_id)
-            rolling_summary_delta = ""
-            if summary:
-                rolling_summary_delta = f"\n\nRecent conversation summary:\n{summary}"
+            rolling_summary_delta = (
+                f"\n\nRecent conversation summary:\n{summary}" if summary else ""
+            )
 
             messages = [
                 {"role": "system", "content": self.system_prompt + rolling_summary_delta},
-                {"role": "user", "content": user_query}
+                {"role": "user", "content": user_query},
             ]
 
-            full_answer_accumulator = []
+            # Active token-budget truncation (before the first primary-LLM call).
+            max_ctx = self.llm_service.max_context_tokens or 32000
+            budget = max(max_ctx - self.system_prompt_reservation, 2048)
+            messages = truncate_messages_to_budget(
+                messages,
+                max_tokens=budget,
+                keep_system=True,
+                model_name=self._tokenizer_model_name,
+            )
+
+            full_answer_accumulator: List[str] = []
             current_turn_id = str(uuid.uuid4())[:8]
 
+            # --- Build extra_body + thinking toggle ---------------------
             thinking_mode = self.llm_call_config.get('thinking_general', {})
-            extra_body = dict(thinking_mode)
+            extra_body: Dict[str, Any] = dict(thinking_mode)
             extra_body['max_tokens'] = self.llm_call_config.get('max_tokens', 2048)
 
-            # Pass extra params to reasoning loop
-            loop_kwargs = {}
-            if 'presence_penalty' in thinking_mode:
-                loop_kwargs['presence_penalty'] = thinking_mode['presence_penalty']
-            if 'repetition_penalty' in thinking_mode:
-                loop_kwargs['repetition_penalty'] = thinking_mode['repetition_penalty']
+            if self.config.get('llm', {}).get('thinking', False):
+                ctk = dict(extra_body.get('chat_template_kwargs', {}))
+                ctk['enable_thinking'] = True
+                extra_body['chat_template_kwargs'] = ctk
+
+            loop_kwargs: Dict[str, Any] = {}
+            for k in ('presence_penalty', 'repetition_penalty', 'top_p', 'top_k'):
+                if k in thinking_mode:
+                    loop_kwargs[k] = thinking_mode[k]
+
+            # --- Bind tools with per-request context --------------------
+            ctx = self._build_tool_context(user_id)
+            bound_tool_map = bind_tools(self.raw_tool_map, ctx)
 
             from cogops.llm.reasoning_loop import stream_with_tool_calls
 
@@ -172,18 +257,24 @@ class Orchestrator:
                     model=self.llm_service.model,
                     messages=messages,
                     tools_schema=self.tools_schema,
-                    available_tools=self.tool_map,
-                    debug_mode=debug_mode,
+                    available_tools=bound_tool_map,
                     max_turns=self.max_turns,
                     extra_body=extra_body,
-                    **loop_kwargs
+                    user_query=original_user_query,
+                    secondary_client=(self.llm_service.client_secondary
+                                      if self.post_refine_enabled else None),
+                    secondary_model=(self.llm_service.llm_config.model
+                                     if (self.post_refine_enabled
+                                         and self.llm_service.llm_config) else ""),
+                    tokenizer=self.tokenizer if self.post_refine_enabled else None,
+                    refine_threshold_tokens=(self.post_refine_threshold
+                                             if self.post_refine_enabled else 0),
+                    **loop_kwargs,
                 )
 
                 clarification_data = None
-                is_answer_complete = False
 
                 async for event in stream_gen:
-                    # Handle clarification_needed specially
                     if event.get("type") == "clarification_needed":
                         clarification_data = {
                             "question": event.get("question", ""),
@@ -193,7 +284,6 @@ class Orchestrator:
                         }
                         if user_id and self.redis_store.available:
                             self.redis_store.set_clarification(user_id, clarification_data)
-                        # Yield clarification event on user channel
                         yield {
                             "type": "clarification_needed",
                             "channel": "user",
@@ -202,9 +292,8 @@ class Orchestrator:
                             "reason": clarification_data.get("reason", ""),
                             "turn_id": clarification_data["turn_id"],
                         }
-                        break  # Stream ends
+                        return
 
-                    # Yield event through
                     yield event
 
                     if event["type"] == "answer_chunk":
@@ -212,36 +301,41 @@ class Orchestrator:
 
                 final_response = "".join(full_answer_accumulator).strip()
 
-                # Mark answer complete
                 yield {
                     "type": "answer_complete",
                     "channel": "both",
                     "turn_id": current_turn_id,
                 }
 
-                # Update Redis if user_id provided
                 if user_id and final_response:
                     turn = {
                         "turn_id": current_turn_id,
-                        "user": user_query,
+                        "user": original_user_query,
                         "assistant": final_response,
                     }
                     self.redis_store.store_turn(user_id, turn)
-                    self.history.append((user_query, final_response))
+                    self.history.append((original_user_query, final_response))
 
-                    # Background summarizer
+                    # Persist the last assistant reply + any options it offered
+                    # so the next short follow-up can be resolved.
+                    self.redis_store.set_last_assistant_meta(user_id, {
+                        "assistant_text": final_response,
+                        "options": _extract_enumerated_options(final_response),
+                        "turn_id": current_turn_id,
+                    })
+
                     asyncio.create_task(run_summarizer_task(
                         secondary_client=self.llm_service.client_secondary,
-                        secondary_model=self.llm_service.llm_config.model if self.llm_service.llm_config else "",
+                        secondary_model=(self.llm_service.llm_config.model
+                                         if self.llm_service.llm_config else ""),
                         user_id=user_id,
                         store=self.redis_store,
-                        user_turn=user_query,
+                        user_turn=original_user_query,
                         assistant_turn=final_response,
                         max_tokens=self.summarizer_max_tokens,
                     ))
 
             except ClarificationRequested as ce:
-                # The ask_user tool raised this
                 clarification_data = {
                     "question": ce.question,
                     "options": ce.options,
@@ -261,32 +355,58 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Critical Error in Orchestrator: {e}", exc_info=True)
-            yield {"type": "error", "content": self.response_templates.get('error_fallback', "Error occurred."), "channel": "user"}
+            yield {
+                "type": "error",
+                "content": self.response_templates.get(
+                    'error_fallback', "Error occurred."),
+                "channel": "user",
+            }
 
     def clear_session(self):
-        """Resets the memory and Redis store."""
         self.history = []
         self.feedback_history = []
         logger.info("Session cleared.")
 
-    def add_feedback(self, user_id: str, turn_id: str, rating: str, comment: str = "") -> None:
-        """Store feedback. Only negative feedback is surfaced to the system."""
-        entry = {"turn_id": turn_id, "rating": rating, "comment": comment, "timestamp": str(uuid.uuid4())[:8]}
+    def add_feedback(self, user_id: str, turn_id: str, rating: str,
+                     comment: str = "") -> None:
+        entry = {
+            "turn_id": turn_id,
+            "rating": rating,
+            "comment": comment,
+            "timestamp": str(uuid.uuid4())[:8],
+        }
         self.feedback_history.append(entry)
-        # Keep only last 5
         if len(self.feedback_history) > 5:
             self.feedback_history.pop(0)
 
     def get_negative_feedback(self) -> str:
-        """Return formatted negative feedback for system context injection."""
-        negatives = [f for f in self.feedback_history if f["rating"] in ("bad", "unhelpful", "wrong")]
+        negatives = [f for f in self.feedback_history
+                     if f["rating"] in ("bad", "unhelpful", "wrong")]
         if not negatives:
             return ""
-        lines = ["Recent negative feedback:", ]
+        lines = ["Recent negative feedback:"]
         for f in negatives:
-            lines.append(f"Turn {f['turn_id']}: rating={f['rating']}, comment='{f.get('comment', '')}'")
+            lines.append(
+                f"Turn {f['turn_id']}: rating={f['rating']}, "
+                f"comment='{f.get('comment', '')}'"
+            )
         return "\n".join(lines)
 
 
-# Backward compat
-GraphitiAgent = Orchestrator
+_ENUMERATED_LINE_RE = re.compile(
+    r"^\s*(?:\d+[.)]|[-*•])\s+(.+)$"
+)
+
+
+def _extract_enumerated_options(text: str) -> List[str]:
+    """Pull bullet/numbered items out of an assistant reply so short follow-ups
+    like '3' can resolve to the third item. Works for both numbered (1., 2))
+    and bullet (-, *, •) enumerations."""
+    if not text:
+        return []
+    out: List[str] = []
+    for line in text.splitlines():
+        m = _ENUMERATED_LINE_RE.match(line)
+        if m:
+            out.append(m.group(1).strip())
+    return out

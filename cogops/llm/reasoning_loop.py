@@ -1,21 +1,40 @@
 """
 cogops/llm/reasoning_loop.py
 
-The tool-calling while loop, extracted from AsyncLLMService.stream_with_tool_calls.
-Tags every yielded event with a channel ("user" or "debug").
+The tool-calling while loop. Every yielded event is tagged with a channel
+("user", "debug", or "both"); the API layer filters events by channel based
+on whether the caller is authenticated for debug.
+
+Behaviour guarantees:
+- The primary LLM MUST call some tool before any user-visible answer. On
+  turn 1 `tool_choice="required"` makes the model pick one (a real info
+  tool, or the `answer_directly` meta-tool for chit-chat / identity /
+  safety). After turn 1 `tool_choice="auto"` lets it stop when done.
+- `answer_directly` short-circuits: its result string carries a sentinel
+  that tells the loop to stream the user-facing text and end immediately,
+  without feeding the tool result back for another primary-LLM pass.
+- Content deltas are streamed chunk-by-chunk on channel "user" as they
+  arrive. No end-of-turn buffering.
+- Large tool results (over a configurable token threshold) are condensed
+  through the secondary LLM before being fed back to the primary. Debug
+  stream sees both raw and refined content via `tool_result_refined`.
 """
 
 import os
 import json
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, List, Dict, Optional, Callable
+import time
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+
 from openai import AsyncOpenAI, BadRequestError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from cogops.tools.answer_directly import ANSWER_DIRECTLY_SENTINEL
+
 RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError, RuntimeError)
 
-_MISSING = object()  # sentinel for getattr on pydantic models
+_MISSING = object()
 
 MAX_TURNS = 10
 
@@ -23,8 +42,6 @@ logger = logging.getLogger(__name__)
 
 
 def log_retry_attempt(retry_state):
-    """Helper to log warnings when retrying API calls."""
-    logger = logging.getLogger(__name__)
     logger.warning(
         f"LLM API call failed with {retry_state.outcome.exception()}, "
         f"retrying in {retry_state.next_action.sleep} seconds... "
@@ -38,10 +55,49 @@ class ContextLengthExceededError(Exception):
 
 
 def _make_event(event_type: str, data: dict, channel: str) -> Dict[str, Any]:
-    """Create a tagged event dict."""
     evt = {"type": event_type, "channel": channel}
     evt.update(data)
     return evt
+
+
+def _parse_direct_answer(tool_result: str):
+    """Return (category, text) if this is an answer_directly result, else None."""
+    if not isinstance(tool_result, str) or not tool_result.startswith(ANSWER_DIRECTLY_SENTINEL + "::"):
+        return None
+    try:
+        _, category, text = tool_result.split("::", 2)
+    except ValueError:
+        return None
+    return category, text
+
+
+async def _refine_tool_output(
+    secondary_client,
+    secondary_model: str,
+    user_query: str,
+    tool_name: str,
+    raw: str,
+    max_tokens: int = 1024,
+) -> str:
+    """Ask the secondary LLM to extract query-relevant bits from a bulky tool result."""
+    from cogops.llm.secondary import call_secondary
+
+    prompt = (
+        "Extract only the parts of the tool output below that are relevant to the "
+        "user's query. Keep the same language as the raw output.\n\n"
+        f"User query: {user_query}\n"
+        f"Tool: {tool_name}\n"
+        f"Raw output:\n{raw}\n\n"
+        "Return a tight, structured excerpt. If nothing is relevant, return exactly: "
+        "NO_RELEVANT_DATA."
+    )
+    return await call_secondary(
+        secondary_client,
+        secondary_model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=0.2,
+    )
 
 
 @retry(
@@ -56,54 +112,65 @@ async def stream_with_tool_calls(
     messages: List[Dict[str, Any]],
     tools_schema: List[Dict[str, Any]],
     available_tools: Dict[str, Callable],
-    debug_mode: bool = False,
     max_turns: int = MAX_TURNS,
     extra_body: Optional[Dict[str, Any]] = None,
+    user_query: str = "",
+    secondary_client=None,
+    secondary_model: str = "",
+    tokenizer=None,
+    refine_threshold_tokens: int = 0,
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Orchestrates the conversation using the primary LLM endpoint:
+    Orchestrates the conversation using the primary LLM endpoint.
 
-    1. Sends prompt -> yields text
-    2. Captures tool calls -> executes tools
-    3. Sends results back -> yields final answer
+    Stream-friendly: text deltas are yielded as `answer_chunk` events on
+    channel "user" as they arrive. Reasoning, tool calls, tool results,
+    and token usage are yielded on channel "debug".
 
-    All events are tagged with a channel:
-      - "debug": reasoning chunks, tool calls, tool results, turn markers
-      - "user":  only the final turn's text content (answer_chunk)
-                 plus any error messages
+    Args:
+        user_query: the original user turn (used by the post-tool refiner
+                    to decide relevance).
+        secondary_client / secondary_model / tokenizer / refine_threshold_tokens:
+                    control the post-tool secondary-LLM refine step. If any
+                    is missing or `refine_threshold_tokens<=0`, refine is off.
     """
-    extra_body = extra_body or {}
-    vllm_params = ['repetition_penalty', 'top_k', 'top_p']
+    extra_body = dict(extra_body or {})
+    vllm_params = ("repetition_penalty", "top_k", "top_p")
     for param in vllm_params:
         if param in kwargs:
             extra_body[param] = kwargs.pop(param)
 
-    # Include usage info in the last streaming chunk for token accounting
+    # Capture usage in the final streaming chunk.
     extra_body.setdefault("stream_options", {"include_usage": True})
+
+    post_refine_enabled = bool(
+        secondary_client and secondary_model and tokenizer and refine_threshold_tokens > 0
+    )
 
     turn_count = 0
     reasoning_accumulator = ""
-
-    # Track whether the current turn is the last (no tools)
-    # We don't know this until the stream ends.
     is_last_turn = False
 
     while turn_count < max_turns:
         turn_count += 1
         logger.info(f"Turn {turn_count}/{max_turns} started.")
 
-        is_last_turn = False  # will be set to True if no tool_calls
+        is_last_turn = False
 
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
-            # Force graph_search on the first turn to prevent the model from
-            # answering without searching. After tool results are fed back,
-            # allow the model to choose freely (auto).
-            tool_choice_val = "auto"
+            # Turn 1: force the model to pick SOME tool. It can freely choose
+            # any real info tool or the answer_directly meta-tool for
+            # chit-chat/identity/safety. This preserves "never answer from
+            # parametric knowledge on factual queries" without pinning the
+            # model to graph_search.
+            # Turn 2+: the model may stop when it has enough context.
             if tools_schema and turn_count <= 1:
-                tool_choice_val = {"type": "function", "function": {"name": "graph_search"}}
+                tool_choice_val = "required"
+            else:
+                tool_choice_val = "auto"
 
             stream = await client_llm.chat.completions.create(
                 model=model,
@@ -112,17 +179,20 @@ async def stream_with_tool_calls(
                 tool_choice=tool_choice_val if tools_schema else None,
                 stream=True,
                 extra_body=extra_body,
-                **kwargs
+                **kwargs,
             )
 
             full_content_accumulator = ""
-            tool_call_index_map = {}
-
-            # Track usage from vLLM's stream_options.include_usage chunk
+            tool_call_index_map: Dict[int, Dict[str, Any]] = {}
             stream_usage: Dict[str, Any] = {}
+            # Content deltas are streamed live; if this turn also emits
+            # tool_calls (rare with vLLM+Qwen), the streamed content becomes
+            # part of the assistant message but is not the final answer. We
+            # flag that so the caller can ignore it.
+            streamed_content_this_turn = False
 
             async for chunk in stream:
-                # Capture usage from the special usage chunk (empty choices, has usage)
+                # Special vLLM usage chunk.
                 if not chunk.choices and hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
                     stream_usage = {
@@ -136,24 +206,23 @@ async def stream_with_tool_calls(
                     continue
                 delta = chunk.choices[0].delta
 
-                # --- Handle Native Thinking Content (always debug) ---
+                # Native thinking channel (Qwen3 vLLM parser).
                 reasoning = getattr(delta, "reasoning", _MISSING)
                 if reasoning is not _MISSING and reasoning:
                     reasoning_accumulator += reasoning
                     yield _make_event("reasoning_chunk", {"data": reasoning}, "debug")
                     continue
 
-                # --- Handle Text Content ---
+                # Stream user-facing content as it arrives.
                 if delta.content:
                     content_chunk = delta.content
                     full_content_accumulator += content_chunk
-                    # Only yield as user channel on the final turn
-                    if is_last_turn:
-                        yield _make_event("answer_chunk", {"content": content_chunk}, "both")
-                    else:
-                        yield _make_event("reasoning_chunk", {"data": content_chunk}, "debug")
+                    streamed_content_this_turn = True
+                    yield _make_event(
+                        "answer_chunk", {"content": content_chunk}, "user"
+                    )
 
-                # --- Handle Tool Call Accumulation ---
+                # Accumulate tool call fragments.
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
                         index = tc_delta.index
@@ -161,7 +230,7 @@ async def stream_with_tool_calls(
                             tool_call_index_map[index] = {
                                 "id": "",
                                 "type": "function",
-                                "function": {"name": "", "arguments": ""}
+                                "function": {"name": "", "arguments": ""},
                             }
                         if tc_delta.id:
                             tool_call_index_map[index]["id"] += tc_delta.id
@@ -170,56 +239,63 @@ async def stream_with_tool_calls(
                         if tc_delta.function and tc_delta.function.arguments:
                             tool_call_index_map[index]["function"]["arguments"] += tc_delta.function.arguments
 
-            # Flush remaining reasoning
             if reasoning_accumulator:
-                yield _make_event("reasoning_chunk", {"data": reasoning_accumulator}, "debug")
-            reasoning_accumulator = ""
+                # No final-flush event — each reasoning chunk was already
+                # streamed above; clear the accumulator for the next turn.
+                reasoning_accumulator = ""
 
-            # Emit captured usage from vLLM stream_options
             if stream_usage:
                 yield _make_event("usage", {"tokens": stream_usage}, "debug")
 
-            # Build response message
-            response_message = {
+            # Build the assistant message to feed back in.
+            response_message: Dict[str, Any] = {
                 "role": "assistant",
-                "content": full_content_accumulator if full_content_accumulator else None
+                "content": full_content_accumulator if full_content_accumulator else None,
             }
 
             tool_calls_list = list(tool_call_index_map.values())
             if tool_calls_list:
                 response_message["tool_calls"] = tool_calls_list
+                if streamed_content_this_turn:
+                    # Content should not have been user-facing on a tool-calling
+                    # turn. Mark it in debug; user already saw the chunks, which
+                    # is tolerable in practice (vLLM+Qwen don't interleave).
+                    logger.debug(
+                        "Content streamed on a tool-calling turn — should be rare."
+                    )
 
             messages.append(response_message)
 
-            # Safety net: if no tools called despite tool_choice forcing graph_search,
-            # inject a reminder into the system prompt and continue. Only allow this
-            # once (on turn 1), then bail out.
             if not tool_calls_list:
-                if turn_count <= 1:
-                    logger.warning("No tool call emitted — injecting mandatory tool reminder.")
+                # Model produced a final answer without a tool call.
+                # Because we force tool_choice="required" on turn 1, this only
+                # happens on turn 2+ when the model has enough tool context
+                # and is wrapping up.
+                if turn_count <= 1 and tools_schema:
+                    # Shouldn't happen (tool_choice=required). Defensive reminder.
+                    logger.warning(
+                        "No tool call emitted on turn 1 despite tool_choice='required'."
+                    )
                     if messages and messages[0].get("role") == "system":
                         messages[0]["content"] += (
-                            "\n\n[SYSTEM REMINDER: You MUST call a tool before producing any answer. "
-                            "Do NOT answer from your own knowledge. Call a tool with Bangla keywords now.]"
+                            "\n\n[SYSTEM REMINDER: You MUST call a tool. For "
+                            "chit-chat / identity / safety use `answer_directly`. "
+                            "For any factual question use an information tool.]"
                         )
                     continue
-                else:
-                    logger.info("No tools called. Ending turn loop.")
-                    is_last_turn = True
-                    if full_content_accumulator:
-                        yield _make_event("answer_chunk", {"content": full_content_accumulator}, "both")
-                    break
+                is_last_turn = True
+                break
 
-            # Emit tool_call events (debug only)
-            yield _make_event("tool_call", {
-                "tool_calls": tool_calls_list,
-                "turn": turn_count
-            }, "debug")
+            yield _make_event(
+                "tool_call",
+                {"tool_calls": tool_calls_list, "turn": turn_count},
+                "debug",
+            )
 
-            # --- Tool Execution Phase ---
+            # --- Execute the tools ---
             logger.info(f"Executing {len(tool_calls_list)} tool(s)...")
-            import time
-            start_time = time.time()
+
+            direct_answer_payload = None
 
             for tool_call in tool_calls_list:
                 function_name = tool_call["function"]["name"]
@@ -227,6 +303,7 @@ async def stream_with_tool_calls(
 
                 function_to_call = available_tools.get(function_name)
                 tool_result_content = ""
+                start_time = time.time()
 
                 if function_to_call:
                     try:
@@ -241,64 +318,180 @@ async def stream_with_tool_calls(
                             if asyncio.iscoroutinefunction(function_to_call):
                                 response_data = await function_to_call(**function_args)
                             else:
-                                response_data = await asyncio.to_thread(function_to_call, **function_args)
-                            tool_result_content = str(response_data)
+                                # functools.partial around a coroutine still reports False for iscoroutinefunction;
+                                # detect the underlying function.
+                                inner = getattr(function_to_call, "func", function_to_call)
+                                if asyncio.iscoroutinefunction(inner):
+                                    response_data = await function_to_call(**function_args)
+                                else:
+                                    response_data = await asyncio.to_thread(function_to_call, **function_args)
+                            tool_result_content = str(response_data) if response_data is not None else ""
 
                     except Exception as e:
                         from cogops.tools.ask_user import ClarificationRequested
                         if isinstance(e, ClarificationRequested):
-                            raise  # Re-raise to outer handler
+                            raise
                         logger.error(f"Error executing {function_name}: {e}", exc_info=True)
                         tool_result_content = f"System Error executing tool: {str(e)}"
                 else:
-                    tool_result_content = f"Error: Tool '{function_name}' not defined in available_tools_map."
+                    tool_result_content = (
+                        f"Error: Tool '{function_name}' not defined in available_tools_map."
+                    )
 
-                elapsed = time.time() - start_time
-                yield _make_event("tool_result", {
-                    "call_id": call_id,
-                    "content": tool_result_content,
-                    "duration_ms": round(elapsed * 1000),
-                    "status": "error" if tool_result_content.startswith("Error") else "ok"
-                }, "debug")
+                # Detect answer_directly short-circuit.
+                direct = _parse_direct_answer(tool_result_content)
+                if direct is not None:
+                    direct_answer_payload = {
+                        "call_id": call_id,
+                        "function_name": function_name,
+                        "category": direct[0],
+                        "text": direct[1],
+                    }
+                    # Don't refine, don't feed back.
+                    yield _make_event(
+                        "tool_result",
+                        {
+                            "call_id": call_id,
+                            "content": f"[answer_directly:{direct[0]}] "
+                                       f"(streamed to user directly)",
+                            "duration_ms": round((time.time() - start_time) * 1000),
+                            "status": "ok",
+                        },
+                        "debug",
+                    )
+                    # Still append a synthetic tool message so the transcript is
+                    # well-formed (not strictly needed since we break next).
+                    messages.append({
+                        "tool_call_id": call_id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": tool_result_content,
+                    })
+                    break  # out of the tool loop
+
+                # Optional secondary-LLM refine for large results.
+                if (
+                    post_refine_enabled
+                    and not tool_result_content.startswith("Error")
+                    and not tool_result_content.startswith("System Error")
+                    and tokenizer is not None
+                    and tokenizer.count(tool_result_content) > refine_threshold_tokens
+                ):
+                    raw = tool_result_content
+                    try:
+                        refined = await _refine_tool_output(
+                            secondary_client=secondary_client,
+                            secondary_model=secondary_model,
+                            user_query=user_query,
+                            tool_name=function_name,
+                            raw=raw,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Refine failed for {function_name}: {e}")
+                        refined = ""
+
+                    if refined and refined.strip() and refined.strip() != "NO_RELEVANT_DATA":
+                        tool_result_content = refined
+                        yield _make_event(
+                            "tool_result_refined",
+                            {
+                                "call_id": call_id,
+                                "raw": raw,
+                                "refined": tool_result_content,
+                            },
+                            "debug",
+                        )
+                    else:
+                        yield _make_event(
+                            "tool_result_refined",
+                            {
+                                "call_id": call_id,
+                                "raw": raw,
+                                "refined": raw,
+                                "note": "refine returned no relevant data; keeping raw",
+                            },
+                            "debug",
+                        )
+
+                elapsed_ms = round((time.time() - start_time) * 1000)
+                yield _make_event(
+                    "tool_result",
+                    {
+                        "call_id": call_id,
+                        "content": tool_result_content,
+                        "duration_ms": elapsed_ms,
+                        "status": "error" if tool_result_content.startswith("Error") else "ok",
+                    },
+                    "debug",
+                )
 
                 messages.append({
                     "tool_call_id": call_id,
                     "role": "tool",
                     "name": function_name,
-                    "content": tool_result_content
+                    "content": tool_result_content,
                 })
+
+            # Short-circuit after streaming the direct answer.
+            if direct_answer_payload is not None:
+                yield _make_event(
+                    "direct_answer",
+                    {
+                        "category": direct_answer_payload["category"],
+                        "call_id": direct_answer_payload["call_id"],
+                    },
+                    "debug",
+                )
+                yield _make_event(
+                    "answer_chunk",
+                    {"content": direct_answer_payload["text"]},
+                    "user",
+                )
+                is_last_turn = True
+                yield _make_event("turn_end", {"turn_number": turn_count}, "debug")
+                return
 
         except BadRequestError as e:
             if "context length" in str(e).lower():
                 logger.error("FATAL: Prompt exceeded context window.")
-                yield _make_event("error", {"content": "Context limit reached. Please clear session."}, "user")
+                yield _make_event(
+                    "error",
+                    {"content": "Context limit reached. Please clear session."},
+                    "user",
+                )
                 raise ContextLengthExceededError() from e
-            else:
-                logger.error(f"API Bad Request: {e}")
-                raise
+            logger.error(f"API Bad Request: {e}")
+            raise
         except Exception as e:
             from cogops.tools.ask_user import ClarificationRequested
             if isinstance(e, ClarificationRequested):
                 logger.info("ClarificationRequested raised by tool.")
-                yield _make_event("clarification_needed", {
-                    "question": e.question,
-                    "options": e.options,
-                    "reason": e.reason,
-                    "turn_id": e.turn_id,
-                }, "user")
-                return  # End stream cleanly on clarification
+                yield _make_event(
+                    "clarification_needed",
+                    {
+                        "question": e.question,
+                        "options": e.options,
+                        "reason": e.reason,
+                        "turn_id": e.turn_id,
+                    },
+                    "both",
+                )
+                return
 
             logger.error(f"Unexpected error in LLM loop: {e}", exc_info=True)
-            yield _make_event("error", {"content": "An internal error occurred.", "detail": str(e)}, "both")
+            yield _make_event(
+                "error",
+                {"content": "An internal error occurred.", "detail": str(e)},
+                "both",
+            )
             raise
 
         yield _make_event("turn_end", {"turn_number": turn_count}, "debug")
 
-    # If we exhausted max_turns without producing a user-visible answer,
-    # emit any remaining accumulated content as final answer.
     if not is_last_turn:
-        logger.info(f"Reached max turns ({max_turns}) without a final answer. Emitting accumulated content.")
-        yield _make_event("answer_chunk", {"content": full_content_accumulator}, "both")
+        logger.info(
+            f"Reached max turns ({max_turns}) without a final answer."
+        )
 
 
 async def classify(
@@ -318,7 +511,7 @@ async def classify(
         api_key=client_reranker.api_key or "",
         base_url=client_reranker.base_url or "",
         model=reranker_model or "reranker",
-        max_tokens=1
+        max_tokens=1,
     )
     reranker = QwenRerankerClient(client=client_reranker, config=reranker_llm_config)
     return await reranker.rank(query, passages)

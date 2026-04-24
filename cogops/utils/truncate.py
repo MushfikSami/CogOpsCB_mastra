@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def truncate_text_to_tokens(text: str, max_tokens: int, model_name: str = "Qwen/Qwen2.5-32B-Instruct") -> str:
+def truncate_text_to_tokens(text: str, max_tokens: int, model_name: str) -> str:
     """Truncate a string to at most max_tokens using the tokenizer."""
     if not text:
         return ""
@@ -29,7 +29,7 @@ def truncate_text_to_tokens(text: str, max_tokens: int, model_name: str = "Qwen/
     return result
 
 
-def truncate_messages_to_budget(messages: List[Dict[str, Any]], max_tokens: int, keep_system: bool = True, model_name: str = "Qwen/Qwen2.5-32B-Instruct") -> List[Dict[str, Any]]:
+def truncate_messages_to_budget(messages: List[Dict[str, Any]], max_tokens: int, keep_system: bool, model_name: str) -> List[Dict[str, Any]]:
     """
     Drop oldest non-system messages from messages list so the total token count fits max_tokens.
     Always keeps system messages first (keep_system=True).

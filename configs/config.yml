@@ -3,8 +3,11 @@
 # ===================================================================
 
 # --- Agent Identity ---
+# Keep agent_story factual-but-generic. Do NOT include specific URLs, service
+# names, or hard facts here — the prompt is static and cannot be updated per
+# turn, and concrete facts risk being parroted when users ask unrelated things.
 agent_name: "আশা"
-agent_story: "আমি বাংলাদেশ সরকারের নাগরিকদের সহায়তা করার জন্য ডিজাইন করা একটি ডিজিটাল উদ্যোগ। আমার লক্ষ্য হলো সরকারি সেবা সংক্রান্ত তথ্য আপনার জন্য সহজলভ্য করে তোলা। jiggasha.ai এর মাধ্যমে, আমি আপনাকে বিভিন্ন সরকারি সেবা, নীতিমালা, এবং প্রক্রিয়া সম্পর্কে তথ্য প্রদান করতে পারি। আমি আপনার প্রশ্নের উত্তর দিতে, নির্দেশনা প্রদান করতে, এবং প্রাসঙ্গিক তথ্য খুঁজে পেতে সাহায্য করতে প্রস্তুত। আসুন, একসাথে বাংলাদেশের নাগরিক সেবার উন্নয়নে কাজ করি!"
+agent_story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি।"
 
 # --- Primary LLM (Agent Reasoning + Native Thinking) ---
 llm:
@@ -21,12 +24,21 @@ reranker:
   base_url_env: "RERANKER_BASE_URL"
   max_context_tokens: 32000
 
-# --- Secondary LLM (General Tasks, Sub-agents) ---
+# --- Secondary LLM (General Tasks, Sub-agents, post-tool refine) ---
 secondary:
   api_key_env: "SECONDARY_API_KEY"
   model_name_env: "SECONDARY_MODEL_NAME"
   base_url_env: "SECONDARY_BASE_URL"
   max_context_tokens: 32000
+  # Per-tool overrides below are consumed by the individual tool handlers.
+  grep_passage:
+    context_lines: 2
+  extract_from_document:
+    max_tokens: 2048
+  delegate_task:
+    max_tokens: 2048
+  spawn_subagent:
+    max_turns: 5
 
 # --- Embedder (Triton Inference Server) ---
 embedder:
@@ -39,11 +51,7 @@ embedder:
 reasoning:
   max_turns: 10
 
-# --- Conversation Management ---
-conversation:
-  history_window: 10  # Number of exchanges to retain in memory
-
-# --- Graphiti Unified Configuration ---
+# --- Graphiti tools ---
 graphiti:
   search:
     limit: 5
@@ -69,18 +77,7 @@ graphiti:
   graph_stats:
     detail_level: "basic"
 
-# --- Secondary Tools ---
-secondary:
-  grep_passage:
-    context_lines: 2
-  extract_from_document:
-    max_tokens: 2048
-  delegate_task:
-    max_tokens: 2048
-  spawn_subagent:
-    max_turns: 5
-
-# --- History Query ---
+# --- History query ---
 history_query:
   default_recent_n: 3
 
@@ -93,14 +90,25 @@ session:
 summarizer:
   max_tokens_env: "SUMMARIZER_MAX_TOKENS"
 
-# --- Token & Prompt Management ---
+# --- Post-tool refine (secondary LLM condenses large tool results) ---
+# When a tool result exceeds threshold_tokens, the reasoning loop runs the
+# secondary LLM to extract only the parts relevant to the user's query.
+# Debug stream shows both raw and refined content.
+post_tool_refine:
+  enabled: true
+  threshold_tokens: 600
+
+# --- Token & prompt management ---
+# tokenizer_model_env: env var that names a HuggingFace model whose tokenizer
+# will be used both for active context truncation AND for the refine
+# threshold check. Typically should match the primary LLM's tokenizer.
+# system_prompt_reservation: tokens reserved for system prompt + rolling
+# summary; the remainder of max_context_tokens is the truncation budget.
 token_management:
   tokenizer_model_env: "TOKENIZER_MODEL_NAME"
-  system_prompt_reservation: 3500  # 16 tools + expanded prompt ~3.5k tokens
-  history_budget: 0.3
+  system_prompt_reservation: 3500
 
-# --- LLM Generation Parameters ---
-# Per-mode parameters sent via extra_body to vLLM
+# --- LLM generation parameters (sent via extra_body to vLLM) ---
 llm_call_parameters:
   thinking_general:
     temperature: 1.0
@@ -125,9 +133,6 @@ llm_call_parameters:
     repetition_penalty: 1.0
   max_tokens: 2048
 
-# --- UX Response Templates ---
+# --- UX response templates ---
 response_templates:
   error_fallback: "একটি প্রযুক্তিগত ত্রুটির কারণে আমি এই মুহূর্তে সাহায্য করতে পারছি না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"
-  tool_failure: "দুঃখিত, তথ্যভাণ্ডার থেকে তথ্য সংগ্রহ করতে সমস্যা হচ্ছে। দয়া করে একটু পর আবার জিজ্ঞাসা করুন।"
-  no_info_found: "দুঃখিত, এই বিষয়ে আমার কাছে বর্তমানে কোনো সঠিক সরকারি তথ্য নেই।"
-  safety_violation: "আপনার অনুরোধটি আমাদের নিরাপত্তা নীতিমালার পরিপন্থী। আমি শুধুমাত্র সরকারি সেবা সংক্রান্ত তথ্য প্রদান করতে পারি।"

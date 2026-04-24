@@ -68,7 +68,3 @@ class AsyncLLMService:
     @property
     def max_context_tokens(self):
         return self.llm_config.max_context_tokens if self.llm_config else 32000
-
-    @property
-    def client_secondary_client(self):
-        return self.client_secondary

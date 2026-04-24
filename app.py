@@ -145,7 +145,8 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                             elif evt_type == "tool_call":
                                 if tool_placeholder:
                                     tc = event.get("tool_calls", [])
-                                    full_tool_log += f"**🔧 Tool Call (turn {event.get('turn', '?')}):** `{tc[0]['function']['name']}`\n"
+                                    names = ", ".join(f"`{t['function']['name']}`" for t in tc)
+                                    full_tool_log += f"**🔧 Tool Call (turn {event.get('turn', '?')}):** {names}\n"
                                     tool_placeholder.markdown(full_tool_log)
 
                             elif evt_type == "tool_result":
@@ -171,6 +172,10 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                                             })
                                             st.rerun()
                                 break  # Stream ends on clarification
+
+                            # --- Ignored debug-only structural events (silently skipped) ---
+                            elif evt_type in ("turn_start", "turn_end", "usage"):
+                                pass
 
                             # --- Existing event types ---
                             elif evt_type == "answer_chunk":

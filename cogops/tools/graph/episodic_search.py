@@ -16,7 +16,7 @@ CONFIG = load_config()
 logger = logging.getLogger(__name__)
 
 
-async def episodic_search(search_term: str, field: str = "text", max_results: int = 10) -> str:
+async def episodic_search(search_term: str, max_results: int = 10) -> str:
     """Search raw passage data in Episodic nodes."""
     from cogops.graph.client import get_graphiti_client
     client = await get_graphiti_client()
@@ -24,7 +24,7 @@ async def episodic_search(search_term: str, field: str = "text", max_results: in
     cfg = get_tool_config(CONFIG, 'episodic_search')
     max_results = max_results or cfg.get('max_results', 10)
 
-    md = f"## Episodic Search: '{search_term}' (field: {field})\n\n"
+    md = f"## Episodic Search: '{search_term}'\n\n"
 
     async with driver.session(database="qwen34neo4j") as session:
         result = await session.run(

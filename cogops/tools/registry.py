@@ -2,28 +2,59 @@
 cogops/tools/registry.py
 
 Build the full tool registry: tools_schema + name-to-callback map.
-Each tool group registers its own schemas and mappers.
+
+Tools fall into two groups:
+- pure tools whose only inputs come from the model (handled as-is)
+- context-dependent tools whose handler needs server-side state
+  (user_id, Redis store, secondary LLM client/model, full tool_map for
+  spawn_subagent). The model-visible JSON schema never exposes those;
+  they are bound per-request via bind_tools(ctx).
 """
 
+import inspect
 import logging
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def build_tool_registry(
-    secondary_client=None,
-    secondary_model: str = "",
-) -> Tuple[List[Dict[str, Any]], Dict[str, callable]]:
-    """
-    Build the complete tool registry from all available tool groups.
+# Parameters that must be injected server-side, never surfaced to the model.
+_INJECTABLE_PARAMS = (
+    "user_id",
+    "store",
+    "secondary_client",
+    "secondary_model",
+    "tool_map",
+    "tools_schema",
+)
 
-    Returns (tools_schema, name_to_callable).
-    """
-    all_schema = []
-    all_map = {}
 
-    # --- Graph tools ---
+@dataclass
+class ToolContext:
+    """Per-request / per-init state that context-dependent tools need.
+
+    `user_id` is per-request (so bind_tools must run per process_query call).
+    Everything else can be bound once at orchestrator init.
+    """
+    user_id: Optional[str] = None
+    store: Optional[Any] = None            # RedisSessionStore
+    secondary_client: Optional[Any] = None
+    secondary_model: str = ""
+    tool_map: Optional[Dict[str, Callable]] = None
+    tools_schema: Optional[List[Dict[str, Any]]] = None
+
+
+def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
+    """
+    Build the raw tool registry. Returned handlers are UNBOUND — callers must
+    pass through `bind_tools(raw_map, ctx)` before dispatching.
+    """
+    all_schema: List[Dict[str, Any]] = []
+    all_map: Dict[str, Callable] = {}
+
+    # --- Graph tools (pure, no context injection) ---
     from cogops.tools.graph.search import graph_search_tools_list as g1, graph_search_tools_map as g2
     from cogops.tools.graph.entity_search import entity_search_tools_list as g3, entity_search_tools_map as g4
     from cogops.tools.graph.entity_detail import entity_detail_tools_list as g5, entity_detail_tools_map as g6
@@ -40,7 +71,7 @@ def build_tool_registry(
         all_schema.extend(s)
         all_map.update(m)
 
-    # --- Secondary-LLM tools ---
+    # --- Secondary-LLM tools (need secondary_client/secondary_model) ---
     from cogops.tools.secondary.grep_passage import grep_passage_tools_list as s1, grep_passage_tools_map as s2
     from cogops.tools.secondary.extract_from_doc import extract_tools_list as s3, extract_tools_map as s4
     from cogops.tools.secondary.delegate_task import delegate_tools_list as s5, delegate_tools_map as s6
@@ -52,17 +83,64 @@ def build_tool_registry(
 
     # --- Interaction tools ---
     from cogops.tools.ask_user import ask_user_tools_list as i1, ask_user_tools_map as i2
-    for s, m in [(i1, i2)]:
-        all_schema.extend(s)
-        all_map.update(m)
+    all_schema.extend(i1)
+    all_map.update(i2)
 
-    # --- History tool ---
+    from cogops.tools.answer_directly import (
+        answer_directly_tools_list as a1,
+        answer_directly_tools_map as a2,
+    )
+    all_schema.extend(a1)
+    all_map.update(a2)
+
+    # --- History tool (needs user_id + store + secondary for 'ask' mode) ---
     from cogops.tools.history.query import history_query_tools_list as h1, history_query_tools_map as h2
     all_schema.extend(h1)
     all_map.update(h2)
 
+    # Enforce additionalProperties: false on every schema so the vLLM tool
+    # parser rejects extra model-invented keys cleanly.
+    for spec in all_schema:
+        params = spec.get("function", {}).get("parameters", {})
+        params.setdefault("additionalProperties", False)
+
     logger.info(f"Tool registry built: {len(all_schema)} tools, {len(all_map)} entries.")
     return all_schema, all_map
+
+
+def bind_tools(
+    raw_tool_map: Dict[str, Callable],
+    ctx: ToolContext,
+) -> Dict[str, Callable]:
+    """
+    Wrap each handler with functools.partial so context-dependent tools get
+    their server-side inputs. The model-visible parameters remain unbound
+    and are supplied at call time from parsed JSON.
+    """
+    ctx_dict = {
+        "user_id": ctx.user_id,
+        "store": ctx.store,
+        "secondary_client": ctx.secondary_client,
+        "secondary_model": ctx.secondary_model,
+        "tool_map": ctx.tool_map,
+        "tools_schema": ctx.tools_schema,
+    }
+
+    bound: Dict[str, Callable] = {}
+    for name, fn in raw_tool_map.items():
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            bound[name] = fn
+            continue
+
+        inject = {
+            k: ctx_dict[k]
+            for k in _INJECTABLE_PARAMS
+            if k in sig.parameters and ctx_dict.get(k) is not None
+        }
+        bound[name] = partial(fn, **inject) if inject else fn
+    return bound
 
 
 def get_tool_names(tools_schema: List[Dict[str, Any]]) -> List[str]:

@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 class Tokenizer:
     """Simple tokenizer wrapper for counting tokens."""
 
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-32B-Instruct"):
+    def __init__(self, model_name: str):
+        if not model_name:
+            raise ValueError("Tokenizer requires an explicit model_name.")
         logger.info(f"Loading tokenizer from '{model_name}'...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         logger.info("Tokenizer loaded.")
