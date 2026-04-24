@@ -346,7 +346,7 @@ class Orchestrator:
                     self.redis_store.set_clarification(user_id, clarification_data)
                 yield {
                     "type": "clarification_needed",
-                    "channel": "user",
+                    "channel": "both",
                     "question": ce.question,
                     "options": ce.options,
                     "reason": ce.reason,

@@ -225,7 +225,7 @@ async def stream_with_tool_calls(
                     full_content_accumulator += content_chunk
                     streamed_content_this_turn = True
                     yield _make_event(
-                        "answer_chunk", {"content": content_chunk}, "user"
+                        "answer_chunk", {"content": content_chunk}, "both"
                     )
 
                 # Accumulate tool call fragments.
@@ -456,7 +456,7 @@ async def stream_with_tool_calls(
                     yield _make_event(
                         "answer_chunk",
                         {"content": text[i:i + step]},
-                        "user",
+                        "both",
                     )
                     if _DIRECT_STREAM_DELAY_SECONDS > 0:
                         await asyncio.sleep(_DIRECT_STREAM_DELAY_SECONDS)
