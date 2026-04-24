@@ -2,7 +2,6 @@
 cogops/llm/clients.py
 
 AsyncOpenAI client factories: creates clients for primary LLM, reranker, secondary.
-Moved from cogops/models/llm.py (the init part).
 """
 
 import os

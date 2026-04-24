@@ -2,7 +2,6 @@
 cogops/embedders/triton.py
 
 TritonEmbedder: custom Triton inference client for Gemma embeddings.
-Moved from cogops/models/embedder.py.
 """
 
 import logging

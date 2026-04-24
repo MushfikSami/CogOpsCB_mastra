@@ -79,6 +79,9 @@ async def stream_with_tool_calls(
         if param in kwargs:
             extra_body[param] = kwargs.pop(param)
 
+    # Include usage info in the last streaming chunk for token accounting
+    extra_body.setdefault("stream_options", {"include_usage": True})
+
     turn_count = 0
     reasoning_accumulator = ""
 
@@ -95,11 +98,18 @@ async def stream_with_tool_calls(
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
+            # Force graph_search on the first turn to prevent the model from
+            # answering without searching. After tool results are fed back,
+            # allow the model to choose freely (auto).
+            tool_choice_val = "auto"
+            if tools_schema and turn_count <= 1:
+                tool_choice_val = {"type": "function", "function": {"name": "graph_search"}}
+
             stream = await client_llm.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=tools_schema if tools_schema else None,
-                tool_choice="auto" if tools_schema else None,
+                tool_choice=tool_choice_val if tools_schema else None,
                 stream=True,
                 extra_body=extra_body,
                 **kwargs
@@ -108,7 +118,20 @@ async def stream_with_tool_calls(
             full_content_accumulator = ""
             tool_call_index_map = {}
 
+            # Track usage from vLLM's stream_options.include_usage chunk
+            stream_usage: Dict[str, Any] = {}
+
             async for chunk in stream:
+                # Capture usage from the special usage chunk (empty choices, has usage)
+                if not chunk.choices and hasattr(chunk, "usage") and chunk.usage:
+                    u = chunk.usage
+                    stream_usage = {
+                        "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                        "completion_tokens": getattr(u, "completion_tokens", 0),
+                        "total_tokens": getattr(u, "total_tokens", 0),
+                    }
+                    continue
+
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -152,6 +175,10 @@ async def stream_with_tool_calls(
                 yield _make_event("reasoning_chunk", {"data": reasoning_accumulator}, "debug")
             reasoning_accumulator = ""
 
+            # Emit captured usage from vLLM stream_options
+            if stream_usage:
+                yield _make_event("usage", {"tokens": stream_usage}, "debug")
+
             # Build response message
             response_message = {
                 "role": "assistant",
@@ -164,14 +191,24 @@ async def stream_with_tool_calls(
 
             messages.append(response_message)
 
-            # If no tools called, model is done — this is the last turn
+            # Safety net: if no tools called despite tool_choice forcing graph_search,
+            # inject a reminder into the system prompt and continue. Only allow this
+            # once (on turn 1), then bail out.
             if not tool_calls_list:
-                logger.info("No tools called. Ending turn loop.")
-                is_last_turn = True
-                # Flush accumulated content as answer chunks (user channel)
-                if full_content_accumulator:
-                    yield _make_event("answer_chunk", {"content": full_content_accumulator}, "both")
-                break
+                if turn_count <= 1:
+                    logger.warning("No tool call emitted — injecting mandatory tool reminder.")
+                    if messages and messages[0].get("role") == "system":
+                        messages[0]["content"] += (
+                            "\n\n[SYSTEM REMINDER: You MUST call a tool before producing any answer. "
+                            "Do NOT answer from your own knowledge. Call a tool with Bangla keywords now.]"
+                        )
+                    continue
+                else:
+                    logger.info("No tools called. Ending turn loop.")
+                    is_last_turn = True
+                    if full_content_accumulator:
+                        yield _make_event("answer_chunk", {"content": full_content_accumulator}, "both")
+                    break
 
             # Emit tool_call events (debug only)
             yield _make_event("tool_call", {

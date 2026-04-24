@@ -208,3 +208,7 @@ __marimo__/
 debug*
 unstable/no_vector_rag_PageIndex/
 ingestion/graphiti_graph/.ingestion_pids/
+
+evaluation/*
+data/*
+dockers/redis/data/*

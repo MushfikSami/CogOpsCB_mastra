@@ -16,8 +16,8 @@ from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.llm_client.config import LLMConfig
 
 from openai import AsyncOpenAI
-from cogops.models.embedder import TritonEmbedder, TritonEmbedderConfig
-from cogops.models.reranker import QwenRerankerClient
+from cogops.embedders.triton import TritonEmbedder, TritonEmbedderConfig
+from cogops.llm.reranker import QwenRerankerClient
 
 # ==========================================
 # LOGGING SETUP

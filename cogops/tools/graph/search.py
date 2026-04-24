@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 from ast import literal_eval
 from dotenv import load_dotenv
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_CROSS_ENCODER
+from graphiti_core.search.search_config import NodeReranker, EdgeReranker, EpisodeReranker
 
 from cogops.config.loader import load_config, get_tool_config
 from cogops.graph.client import get_graphiti_client
@@ -28,6 +29,10 @@ async def graph_search(query: str) -> str:
     """
     Searches the Government Knowledge Graph for relevant facts, regulations, and procedures.
 
+    Uses BM25 + vector similarity with Reciprocal Rank Fusion (RRF) reranking.
+    The cross-encoder reranker is unreliable for Bangla content (returns 0.0 scores),
+    so we use RRF which naturally combines BM25 and cosine similarity.
+
     Args:
         query (str): The specific search query (e.g., "passport renewal fee", "birth registration process").
 
@@ -38,7 +43,12 @@ async def graph_search(query: str) -> str:
     search_config = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
     search_config_params = get_tool_config(CONFIG, 'graph_search')
     limit = search_config_params.get('limit', 5)
-    reranker_thresh = search_config_params.get('min_score', '0.9')
+    sim_thresh = search_config_params.get('sim_min_score', 0.5)
+
+    # Use RRF reranker instead of cross-encoder which fails on Bangla text
+    search_config.node_config.reranker = NodeReranker.rrf
+    search_config.edge_config.reranker = EdgeReranker.rrf
+    search_config.episode_config.reranker = EpisodeReranker.rrf
 
     logger.info(f"Executing Graph Search: '{query}' (Limit: {limit})")
 
@@ -49,39 +59,45 @@ async def graph_search(query: str) -> str:
 
         md_content = ""
 
-        # Nodes Section
+        # Nodes Section — RRF scores are meaningful (combines BM25 + cosine + BFS)
         md_content += "\n## Nodes\n"
         node_summaries = []
-        for node, score in zip(results.nodes, results.node_reranker_scores):
-            if score > reranker_thresh:
+        for i, node in enumerate(results.nodes):
+            score = results.node_reranker_scores[i] if i < len(results.node_reranker_scores) else 0.0
+            if score >= sim_thresh:
                 node_summaries.append(f"**{node.name}**:{node.summary}")
         if node_summaries:
             md_content += "- " + "\n- ".join(node_summaries[:limit]) + "\n\n"
         else:
             md_content += "No relevant nodes found.\n\n"
 
-        # Edges Section
+        # Edges Section — RRF scores
         md_content += "## Edges\n"
         edge_facts = []
-        for edge, score in zip(results.edges, results.edge_reranker_scores):
-            if score > reranker_thresh:
+        for i, edge in enumerate(results.edges):
+            score = results.edge_reranker_scores[i] if i < len(results.edge_reranker_scores) else 0.0
+            if score >= sim_thresh:
                 edge_facts.append(edge.fact)
         if edge_facts:
             md_content += "- " + "\n- ".join(edge_facts[:limit]) + "\n\n"
         else:
             md_content += "No edges found.\n\n"
 
-        # Episodes Section
+        # Episodes Section — RRF scores (episodes use BM25 only, RRF handles ranking)
         md_content += "## Passages\n"
         episode_data = []
-        for episode, score in zip(results.episodes, results.episode_reranker_scores):
-            if score > reranker_thresh:
-                json_episode = literal_eval(episode.content)
-                passage = json_episode["text"].split("Category")[0].strip()
-                context = json_episode["text"].split("Category")[-1].strip()
-                url = json_episode.get("url", "")
-                text = f"# passage_context:\n {context}\n\n # passage_text:\n{passage} \n # Sources:\n{url}"
-                episode_data.append(text)
+        for i, episode in enumerate(results.episodes):
+            score = results.episode_reranker_scores[i] if i < len(results.episode_reranker_scores) else 0.0
+            if score >= sim_thresh:
+                try:
+                    json_episode = literal_eval(episode.content)
+                    passage = json_episode["text"].split("Category")[0].strip()
+                    context = json_episode["text"].split("Category")[-1].strip()
+                    url = json_episode.get("url", "")
+                    text = f"# passage_context:\n {context}\n\n # passage_text:\n{passage} \n # Sources:\n{url}"
+                    episode_data.append(text)
+                except Exception:
+                    pass
         if episode_data:
             md_content += "- " + "\n- ".join(episode_data[:limit]) + "\n\n"
         else:

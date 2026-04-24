@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 from cogops.agents.orchestrator import GraphitiAgent
 
 from cogops.events.channels import filter_for_user, filter_for_debug
+from cogops.session.query_log import QueryLog
+
+_query_log = QueryLog()
 
 load_dotenv()
 
@@ -78,6 +81,12 @@ async def get_agent_session(user_id: str) -> GraphitiAgent:
 
 # --- Endpoints ---
 
+@app.get("/query-log", tags=["System"])
+async def query_log_endpoint():
+    """Return the stored queries with timestamps (last 10 days, nothing else)."""
+    return _query_log.entries
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
     """System status and active session count."""
@@ -97,6 +106,9 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = Header(
     """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    # Log the incoming query (text + timestamp only, nothing else).
+    _query_log.append(request.query)
 
     agent = await get_agent_session(request.user_id)
     server_debug_secret = os.getenv("ADMIN_DEBUG_SECRET")

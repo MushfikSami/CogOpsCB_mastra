@@ -2,13 +2,12 @@
 cogops/config/loader.py
 
 Configuration loading: load_config(), EndpointConfig.
-Replaces the in-module copies from cogops/models/llm.py and
-cogops/tools/graphiti_tools.py.
 """
 
 import os
 import yaml
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -17,8 +16,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Default: look for config.yml in the repo root (3 levels up from cogops/config/loader.py)
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+
 
 def load_config(config_path: str = "configs/config.yml") -> dict:
+    # If the path is relative and the file doesn't exist, try resolving
+    # relative to the project root (this cogops/config/ directory's parent).
+    if not os.path.isabs(config_path):
+        if not os.path.exists(config_path):
+            fallback = os.path.join(_PROJECT_ROOT, config_path)
+            if os.path.exists(fallback):
+                config_path = fallback
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
