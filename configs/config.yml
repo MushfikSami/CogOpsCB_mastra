@@ -56,6 +56,8 @@ reasoning:
   short_followup_max_chars: 16
   direct_stream_chars_per_chunk: 12
   direct_stream_delay_seconds: 0.015
+  max_concurrent_query: 2
+  max_input_chars: 1000
 
 # --- Neo4j / Graphiti ---
 neo4j:
@@ -64,7 +66,7 @@ neo4j:
 # --- Graphiti tools ---
 graphiti:
   tree_explorer:
-    min_score: 0.5    # Qwen cross-encoder threshold (nodes + edges)
+    min_score: 0.8    # Qwen cross-encoder threshold (nodes + edges)
     keep_top_n: 15     # Initial candidates passed to cross-encoder
     max_edges_per_entity: 30
   max_relations_displayed: 10
