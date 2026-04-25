@@ -352,6 +352,7 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
 
     return "\n".join(md_lines)
 
+
 # ── Tool Schema & Mapping ─────────────────────────────────────────────
 
 tree_explorer_tools_list =[
@@ -359,13 +360,23 @@ tree_explorer_tools_list =[
         "type": "function",
         "function": {
             "name": "tree_explorer",
-            "description": "Build a query-aware hierarchical information tree from the Bangladesh Government Knowledge Graph. Returns entities, edges (with relation types), and episode summaries relevant to the query. Use when the user asks about any government service, procedure, fee, document requirement, or process — especially when the answer requires understanding relationships between entities.",
+            "description": (
+                "Build a query-aware hierarchical information tree from the Bangladesh Government Knowledge Graph. "
+                "Returns entities, edges (with relation types), and episode summaries relevant to the query. "
+                "Use when the user asks about any government service, procedure, fee, document requirement, or process. "
+                "\n\nCRITICAL QUERY FORMULATION RULES:\n"
+                "Formulate the `query` parameter to be as specific as the user's intent requires. Do not just use a broad entity name if the user is asking for specific details.\n"
+                "- Action/How-to: If asking how to do something, include process/procedure terms (e.g., instead of just '[Document] update', use '[Document][Target Field] update process').\n"
+                "- Definition/What is: If asking what something is, specify the intent (e.g., '[Entity] definition' or 'purpose of [Entity]').\n"
+                "- Provider/Who issues: If asking who gives a document or provides a service, target the provider (e.g., 'authority to issue [Document]').\n"
+                "- Broad/Exploratory: ONLY if the user asks a intentionally vague question (e.g., 'I want to know about [Entity]'), use the broad '[Entity]' name to explore and list what general information is available."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The user's full query about government services, processes, fees, documents, or procedures.",
+                        "description": "The optimally specific search query formulated based on the user's exact intent, following the rules in the function description.",
                     }
                 },
                 "required": ["query"],
