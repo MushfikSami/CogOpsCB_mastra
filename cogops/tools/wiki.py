@@ -18,7 +18,6 @@ reasoning loop runs them via asyncio.to_thread when needed.
 import asyncio
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -66,22 +65,6 @@ _HEADERS = {"User-Agent": _USER_AGENT}
 
 
 # --- Helpers -----------------------------------------------------------
-
-_HTML_TAG_RE = re.compile(r"<.*?>")
-
-
-def _strip_html(raw: str) -> str:
-    return _HTML_TAG_RE.sub("", raw or "").strip()
-
-
-def _enforce_bangladesh_context(query: str) -> str:
-    """Always append the Bengali word for Bangladesh so results stay in scope."""
-    q = (query or "").strip()
-    if not q:
-        return "বাংলাদেশ"
-    if "বাংলাদেশ" in q or "bangladesh" in q.lower():
-        return q
-    return f'{q} "বাংলাদেশ"'
 
 
 def _format_timestamp(wiki_ts: str) -> Dict[str, Any]:
@@ -133,40 +116,50 @@ def _do_get(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _wikipedia_search_sync(query: str, top: int) -> str:
-    """Return a markdown-formatted list of the top-N Wikipedia hits."""
+    """Return a markdown-formatted list of Wikipedia page-title suggestions.
+
+    Uses the OpenSearch (autocomplete) endpoint, which returns titles only —
+    no snippets, no timestamps. The titles are intended to be passed to
+    `wikipedia_get_summary` / `wikipedia_get_full_content`.
+
+    OpenSearch response shape: [query, [titles], [descriptions], [links]]
+    """
     cfg = get_tool_config(_CONFIG, "wiki") or {}
     limit = max(1, min(int(top or cfg.get("search_limit", _DEFAULT_SEARCH_LIMIT)), 10))
 
-    forced_query = _enforce_bangladesh_context(query)
+    if not query or not query.strip():
+        return "অনুসন্ধান প্রশ্ন খালি। একটি বৈধ অনুসন্ধান প্রশ্ন দিন।"
+
     data = _do_get({
-        "action": "query",
+        "action": "opensearch",
         "format": "json",
-        "list": "search",
-        "srsearch": forced_query,
-        "srlimit": limit,
+        "search": query,
+        "limit": limit,
         "utf8": 1,
     })
     if data is None:
         return "Wikipedia অনুসন্ধানে ত্রুটি হয়েছে। পরে চেষ্টা করুন।"
 
-    results = data.get("query", {}).get("search", []) or []
-    if not results:
-        return (
-            f"কোনো Wikipedia ফলাফল পাওয়া যায়নি '{query}'-এর জন্য "
-            f"(বাংলাদেশ প্রসঙ্গে)।"
-        )
+    if not isinstance(data, list) or len(data) < 4:
+        return f"Wikipedia OpenSearch থেকে অপ্রত্যাশিত সাড়া: '{query}'।"
 
-    out: List[str] = [f"## Wikipedia: '{query}' ({len(results)} results)\n"]
-    for i, r in enumerate(results, 1):
-        title = r.get("title", "")
-        snippet = _strip_html(r.get("snippet", ""))
-        url = f"https://bn.wikipedia.org/wiki/{title.replace(' ', '_')}"
-        ts = _format_timestamp(r.get("timestamp", ""))
-        out.append(
-            f"**{i}. {title}**{_format_age_note(ts)}\n"
-            f"   URL: {url}\n"
-            f"   Snippet: {snippet}\n"
-        )
+    titles = data[1] or []
+    descriptions = data[2] or []
+    links = data[3] or []
+
+    if not titles:
+        # OpenSearch found nothing — fall back to semantic ChromaDB lookup.
+        return _chroma_title_fallback_sync(query, limit)
+
+    out: List[str] = [f"## Wikipedia শিরোনাম প্রস্তাব: '{query}' ({len(titles)})\n"]
+    for i, title in enumerate(titles, 1):
+        desc = descriptions[i - 1] if i - 1 < len(descriptions) else ""
+        url = links[i - 1] if i - 1 < len(links) else \
+            f"https://bn.wikipedia.org/wiki/{title.replace(' ', '_')}"
+        line = f"**{i}. {title}**\n   URL: {url}\n"
+        if desc:
+            line += f"   বিবরণ: {desc}\n"
+        out.append(line)
     return "\n".join(out)
 
 
@@ -244,39 +237,48 @@ def _wikipedia_get_full_content_sync(page_title: str) -> str:
     return f"Wikipedia পূর্ণ পাঠ্য পাওয়া যায়নি: '{page_title}'।"
 
 
-# --- ChromaDB-based title suggestion -----------------------------------
+# --- ChromaDB semantic fallback (used internally by wikipedia_search) --
 
 
-def _wikipedia_title_suggest_sync(query: str, top: int) -> str:
-    """Find Wikipedia page titles via ChromaDB semantic search.
+def _chroma_title_fallback_sync(query: str, top: int) -> str:
+    """Internal: semantic fallback when OpenSearch returns no titles.
 
-    Embeds the query with the Triton embedder (using the same query prefix
-    as ingestion), then queries the WikiTitles collection.
+    The WikiTitles collection stores page titles as documents, no metadata
+    (see ingestion/wiki_title_vectorizer/chroma_config.yml — metadata_columns
+    is empty and content_column is `page_title`). We embed the query with the
+    same Gemma Triton embedder used at ingest time and read back
+    `documents` + `distances` only.
     """
     cfg = get_tool_config(_CONFIG, "wiki") or {}
-    n_results = max(1, min(top or cfg.get("chroma_top", _CHROMA_TOP), 10))
+    n_results = max(1, min(int(top or cfg.get("chroma_top", _CHROMA_TOP)), 10))
 
-    # Build embedder — uses the same Gemma model as ingestion
+    # tritonclient.http.InferenceServerClient expects "host:port" — no scheme.
     triton_url = _TRITON_URL
-    if not triton_url.startswith(("http://", "https://")):
-        triton_url = f"http://{triton_url}"
-    embedder_cfg = TritonEmbedderConfig(
-        url=triton_url,
-        model_name=_TRITON_MODEL,
-        tokenizer_path=_TRITON_TOKENIZER,
-        max_batch_size=8,
-    )
-    embedder = TritonEmbedder(config=embedder_cfg)
-
+    for prefix in ("http://", "https://"):
+        if triton_url.startswith(prefix):
+            triton_url = triton_url[len(prefix):]
+            break
     try:
+        embedder_cfg = TritonEmbedderConfig(
+            url=triton_url,
+            model_name=_TRITON_MODEL,
+            tokenizer_path=_TRITON_TOKENIZER,
+            max_batch_size=8,
+        )
+        embedder = TritonEmbedder(config=embedder_cfg)
         embedding = embedder.create_sync(_QUERY_PREFIX + (query or ""))
     except Exception as e:
-        return f"ট্রাইটন এম্বেডিং ত্রুটি: {e}"
+        return f"ট্রাইটন এম্বেডিং ত্রুটি: {type(e).__name__}: {e}"
 
-    # Connect to ChromaDB
+    # chromadb.HttpClient expects a bare host — strip any scheme from env.
+    chroma_host = _CHROMA_DB_HOST
+    for prefix in ("http://", "https://"):
+        if chroma_host.startswith(prefix):
+            chroma_host = chroma_host[len(prefix):]
+            break
     try:
         chroma_client = chromadb.HttpClient(
-            host=_CHROMA_DB_HOST, port=_CHROMA_DB_PORT
+            host=chroma_host, port=_CHROMA_DB_PORT
         )
         chroma_client.heartbeat()
     except Exception as e:
@@ -291,31 +293,30 @@ def _wikipedia_title_suggest_sync(query: str, top: int) -> str:
         results = collection.query(
             query_embeddings=[embedding],
             n_results=n_results,
-            include=["metadatas"],
+            include=["documents", "distances"],
         )
     except Exception as e:
         return f"ক্রোমাডিবি অনুসন্ধান ত্রুটি: {e}"
 
-    titles = results.get("documents", [[]])[0]
-    distances = results.get("distances", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
+    titles = (results.get("documents") or [[]])[0]
+    distances = (results.get("distances") or [[]])[0]
 
     if not titles:
         return (
-            f"'{query}'-এর জন্য কোনো মিল পাওয়া যায়নি Wikipedia শিরোনামের "
-            f"ভেক্টর ডেটাবেজে। অনুগ্রহ করে ভিন্ন কিওয়ার্ড ব্যবহার করুন।"
+            f"'{query}'-এর জন্য কোনো Wikipedia শিরোনাম প্রস্তাব পাওয়া যায়নি "
+            f"(OpenSearch ও ভেক্টর উভয় উৎসে)।"
         )
 
-    out: List[str] = [f"## ভেক্টর মিল: '{query}' ({len(titles)} শিরোনাম)\n"]
-    for i, (title, dist, meta) in enumerate(zip(titles, distances, metadatas), 1):
+    out: List[str] = [
+        f"## Wikipedia শিরোনাম প্রস্তাব (ভেক্টর ফলব্যাক): '{query}' ({len(titles)})\n"
+    ]
+    for i, (title, dist) in enumerate(zip(titles, distances), 1):
+        url = f"https://bn.wikipedia.org/wiki/{str(title).replace(' ', '_')}"
         out.append(
             f"**{i}. {title}**\n"
-            f"   দূরত্ব: {dist:.4f}\n"
+            f"   URL: {url}\n"
+            f"   দূরত্ব: {float(dist):.4f}\n"
         )
-        if meta:
-            source = meta.get("source", "")
-            if source:
-                out.append(f"   উৎস: {source}\n")
     return "\n".join(out)
 
 
@@ -333,10 +334,6 @@ async def wikipedia_get_full_content(page_title: str) -> str:
     return await asyncio.to_thread(_wikipedia_get_full_content_sync, page_title)
 
 
-async def wikipedia_title_suggest(query: str, top: int = 5) -> str:
-    return await asyncio.to_thread(_wikipedia_title_suggest_sync, query, top)
-
-
 # --- Schemas -----------------------------------------------------------
 
 wikipedia_tools_list = [
@@ -345,14 +342,12 @@ wikipedia_tools_list = [
         "function": {
             "name": "wikipedia_search",
             "description": (
-                "Fallback: search Bangla Wikipedia for the user's query "
-                "(Bangladesh context is automatically enforced). Use this "
-                "ONLY after graph tools (graph_search / entity_search / "
-                "episodic_search) have been tried and returned no useful "
-                "result. Returns the top-N page titles with snippets, URLs, "
-                "and last-edited dates. Always start with `top=1` and call "
-                "`wikipedia_get_summary` on the first result; only try the "
-                "next result if the summary isn't relevant."
+                "Fallback: get Wikipedia page-title suggestions (autocomplete) "
+                "for the query. Use ONLY after graph tools have been tried and "
+                "returned no useful result. Returns a ranked list of suggested "
+                "page titles (with URLs and short descriptions). The titles are "
+                "meant to be passed to `wikipedia_get_summary`, then "
+                "`wikipedia_get_full_content` if the summary is insufficient."
             ),
             "parameters": {
                 "type": "object",
@@ -360,15 +355,15 @@ wikipedia_tools_list = [
                     "query": {
                         "type": "string",
                         "description": (
-                            "Search term in Bengali (preferred) or English. "
-                            "The tool auto-appends the Bangladesh context."
+                            "Search term in Bengali (preferred) or English."
                         ),
                     },
                     "top": {
                         "type": "integer",
                         "description": (
-                            "Number of results to return (1–10). Start at 1; "
-                            "increase only if earlier summaries aren't useful."
+                            "Number of title suggestions to return (1–10). "
+                            "Start at 1; increase only if earlier summaries "
+                            "aren't useful."
                         ),
                     },
                 },
@@ -420,45 +415,10 @@ wikipedia_tools_list = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "wikipedia_title_suggest",
-            "description": (
-                "Fallback: find relevant Wikipedia page titles using semantic "
-                "similarity against a pre-indexed vector database. Use ONLY when "
-                "`wikipedia_search` returns no results. Convert the user's query "
-                "into Bengali keywords before calling. Returns a ranked list of "
-                "matching Wikipedia page titles. After getting results, call "
-                "`wikipedia_get_summary` on the top result; if the summary "
-                "doesn't answer, try the next title from this list."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "Search keywords in Bengali (preferred). Convert "
-                            "the user's query into Bengali keywords before searching."
-                        ),
-                    },
-                    "top": {
-                        "type": "integer",
-                        "description": (
-                            "Number of titles to return (1–10). Start at 3–5."
-                        ),
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
 ]
 
 wikipedia_tools_map = {
     "wikipedia_search": wikipedia_search,
     "wikipedia_get_summary": wikipedia_get_summary,
     "wikipedia_get_full_content": wikipedia_get_full_content,
-    "wikipedia_title_suggest": wikipedia_title_suggest,
 }

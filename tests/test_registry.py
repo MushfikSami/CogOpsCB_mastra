@@ -14,11 +14,11 @@ def _reset_modules():
 class TestBuildToolRegistry:
     """build_tool_registry() output structure."""
 
-    def test_returns_21_tools(self):
+    def test_returns_20_tools(self):
         from cogops.tools.registry import build_tool_registry
         schema, m = build_tool_registry()
-        assert len(schema) == 21
-        assert len(m) == 21
+        assert len(schema) == 20
+        assert len(m) == 20
 
     def test_all_schemas_are_valid_openai(self):
         from cogops.tools.registry import build_tool_registry
@@ -56,7 +56,7 @@ class TestBuildToolRegistry:
             "history_query",
             "answer_directly",
             "wikipedia_search", "wikipedia_get_summary",
-            "wikipedia_get_full_content", "wikipedia_title_suggest",
+            "wikipedia_get_full_content",
         }
         assert set(m.keys()) == expected
 
@@ -66,7 +66,7 @@ class TestGetToolNames:
         from cogops.tools.registry import build_tool_registry, get_tool_names
         schema, _ = build_tool_registry()
         names = get_tool_names(schema)
-        assert len(names) == 21
+        assert len(names) == 20
 
     def test_names_match_schema(self):
         from cogops.tools.registry import build_tool_registry, get_tool_names
