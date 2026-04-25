@@ -89,15 +89,6 @@ for msg in st.session_state.messages:
         if msg["role"] == "user":
             st.markdown(msg["content"])
         elif msg["role"] == "assistant":
-            if msg.get("clarification_question"):
-                with st.container():
-                    st.warning(msg["clarification_question"])
-                    if msg.get("clarification_options"):
-                        for opt in msg["clarification_options"]:
-                            if st.button(f"→ {opt}", key=f"clarify_{msg.get('turn_id', '')}_{opt}"):
-                                # This button would normally send the user's reply via the API
-                                st.session_state.messages.append({"role": "user", "content": opt})
-                                st.rerun()
             if msg.get("cot_content"):
                 with st.expander("Reasoning", expanded=False):
                     st.markdown(msg["cot_content"])
@@ -123,7 +114,6 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         full_cot = ""
         full_tool_log = ""
         full_response = ""
-        clarification_data = None
 
         payload = {"user_id": st.session_state.user_id, "query": prompt}
         headers = {"X-Debug-Key": DEBUG_SECRET}
@@ -158,24 +148,6 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                                     full_tool_log += f"**✅ Tool Result:**\n```\n{str(content)}\n```\n\n"
                                     tool_placeholder.markdown(full_tool_log)
 
-                            elif evt_type == "clarification_needed":
-                                clarification_data = {
-                                    "question": event.get("question", ""),
-                                    "options": event.get("options", []),
-                                    "reason": event.get("reason", ""),
-                                    "turn_id": event.get("turn_id", ""),
-                                }
-                                st.warning(clarification_data["question"])
-                                if clarification_data["options"]:
-                                    for opt in clarification_data["options"]:
-                                        if st.button(f"→ {opt}", key=f"clarify_{clarification_data['turn_id']}_{opt}"):
-                                            st.session_state.messages.append({
-                                                "role": "user",
-                                                "content": opt,
-                                            })
-                                            st.rerun()
-                                break  # Stream ends on clarification
-
                             # --- Ignored debug-only structural events (silently skipped) ---
                             elif evt_type in ("turn_start", "turn_end", "usage"):
                                 pass
@@ -200,10 +172,6 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                 "cot_content": full_cot if full_cot else None,
                 "tool_content": full_tool_log if full_tool_log else None,
             }
-            if clarification_data:
-                msg_entry["clarification_question"] = clarification_data["question"]
-                msg_entry["clarification_options"] = clarification_data["options"]
-                msg_entry["turn_id"] = clarification_data.get("turn_id", "")
             st.session_state.messages.append(msg_entry)
 
         except Exception as e:

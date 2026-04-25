@@ -334,9 +334,6 @@ async def stream_with_tool_calls(
                             tool_result_content = str(response_data) if response_data is not None else ""
 
                     except Exception as e:
-                        from cogops.tools.ask_user import ClarificationRequested
-                        if isinstance(e, ClarificationRequested):
-                            raise
                         logger.error(f"Error executing {function_name}: {e}", exc_info=True)
                         tool_result_content = f"System Error executing tool: {str(e)}"
                 else:
@@ -476,32 +473,6 @@ async def stream_with_tool_calls(
             logger.error(f"API Bad Request: {e}")
             raise
         except Exception as e:
-            from cogops.tools.ask_user import ClarificationRequested
-            if isinstance(e, ClarificationRequested):
-                logger.info("ClarificationRequested raised by tool.")
-                # Stream the clarification question as answer_chunk
-                # so it appears in full_response like any other answer.
-                question_text = e.question
-                if e.options:
-                    question_text += "\n\n" + "\n".join(f"- {o}" for o in e.options)
-                for i in range(0, len(question_text), _DEFAULT_CHARS_PER_CHUNK * 4):
-                    yield _make_event(
-                        "answer_chunk",
-                        {"content": question_text[i:i + _DEFAULT_CHARS_PER_CHUNK * 4]},
-                        "both",
-                    )
-                yield _make_event(
-                    "clarification_needed",
-                    {
-                        "question": e.question,
-                        "options": e.options,
-                        "reason": e.reason,
-                        "turn_id": e.turn_id,
-                    },
-                    "both",
-                )
-                return
-
             logger.error(f"Unexpected error in LLM loop: {e}", exc_info=True)
             yield _make_event(
                 "error",

@@ -4,10 +4,10 @@ cogops/agents/orchestrator.py
 The Orchestrator for the GovOps Agent.
 
 - Loads config, builds tool registry + system prompt.
-- Per-request: binds tools with a ToolContext, handles pending clarifications,
-  handles short ambiguous follow-ups, truncates messages to the token budget,
-  runs the reasoning loop, persists turn + last-assistant meta to Redis,
-  kicks off the async summarizer.
+- Per-request: binds tools with a ToolContext, handles short ambiguous
+  follow-ups, truncates messages to the token budget, runs the reasoning
+  loop, persists turn + last-assistant meta to Redis, kicks off the async
+  summarizer.
 """
 
 import os
@@ -28,7 +28,6 @@ from cogops.prompts.system import get_graph_prompt
 from cogops.session.redis_store import RedisSessionStore
 from cogops.session.summarizer import run_summarizer_task
 from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
-from cogops.tools.ask_user import ClarificationRequested
 from cogops.utils.tokenizer import Tokenizer
 from cogops.utils.truncate import truncate_messages_to_budget
 from cogops.llm.reasoning_loop import _make_event
@@ -37,9 +36,6 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-# _SHORT_FOLLOWUP_MAX_CHARS is now read from config in __init__
 
 
 def _is_short_followup(text: str, max_chars: int = 16) -> bool:
@@ -54,12 +50,6 @@ def _is_short_followup(text: str, max_chars: int = 16) -> bool:
                                 "tell me more", "more details", "that one")):
         return True
     return bool(re.fullmatch(r"\d+[.)\s]*", s))
-
-
-def _format_options(options: List[str]) -> str:
-    if not options:
-        return ""
-    return "\n".join(f"- {o}" for o in options)
 
 
 class Orchestrator:
@@ -162,66 +152,33 @@ class Orchestrator:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main pipeline:
-        1. If a clarification is pending, replay the question + options
-           alongside the user reply.
-        2. If the message is short/numeric and the user has a prior assistant
+        1. If the message is short/numeric and the user has a prior assistant
            reply stored, inject that reply as context so the model can resolve
            the reference (e.g. "3" -> third item in the list).
-        3. Build [system + rolling summary, user_query], truncate to token
+        2. Build [system + rolling summary, user_query], truncate to token
            budget, run the reasoning loop with a per-request bound tool map.
-        4. Stream events; persist turn + last-assistant-meta; trigger
+        3. Stream events; persist turn + last-assistant-meta; trigger
            summarizer in the background.
         """
         logger.info(f"Processing Query: {user_query}")
         original_user_query = user_query
 
         try:
-            # --- Follow-up / clarification resolution --------------------
-            clarification_replay = None
-            if user_id and self.redis_store.available:
-                pending = self.redis_store.get_clarification(user_id)
-                if pending:
-                    clarification_replay = pending
-                    self.redis_store.clear_clarification(user_id)
-                    self.history.append((pending.get('question', ''), user_query))
-                    opts = _format_options(pending.get('options', []))
+            # --- Short follow-up resolution ------------------------------
+            if user_id and self.redis_store.available and _is_short_followup(original_user_query, self.short_followup_max_chars):
+                last = self.redis_store.get_last_assistant_meta(user_id)
+                if last and last.get('assistant_text'):
+                    opts = _format_options(last.get('options') or [])
                     user_query = (
-                        f"Previous question: {pending.get('question', '')}\n"
-                        + (f"Previous options:\n{opts}\n" if opts else "")
-                        + f"\nUser reply: {original_user_query}\n\n"
-                          f"Resolve which option the user meant (by number, keyword, "
-                          f"or position) and proceed. Then call the appropriate tool."
+                        f"Previous assistant reply (for context):\n"
+                        f"{last['assistant_text']}\n"
+                        + (f"\nEnumerated options:\n{opts}\n" if opts else "")
+                        + f"\nUser follow-up: {original_user_query}\n\n"
+                          f"If this follow-up refers to an item in the previous "
+                          f"reply, resolve it first (call history_query "
+                          f"mode='recent' n=2 if you need more context), then "
+                          f"call the appropriate information tool."
                     )
-                else:
-                    last = self.redis_store.get_last_assistant_meta(user_id)
-                    if last and last.get('is_clarification'):
-                        # Clarification was asked but the old pending key wasn't set
-                        # (or already consumed). Replay the question from meta.
-                        self.history.append((last.get('assistant_text', ''), user_query))
-                        opts = _format_options(last.get('options') or [])
-                        user_query = (
-                            f"Previous question: {last.get('assistant_text', '')}\n"
-                            + (f"Previous options:\n{opts}\n" if opts else "")
-                            + f"\nUser reply: {original_user_query}\n\n"
-                              f"Resolve which option the user meant (by number, keyword, "
-                              f"or position) and proceed. Then call the appropriate tool."
-                        )
-                        # Mark it consumed so it doesn't replay again.
-                        last['is_clarification'] = False
-                        self.redis_store.set_last_assistant_meta(user_id, last)
-                    elif _is_short_followup(original_user_query, self.short_followup_max_chars):
-                        if last and last.get('assistant_text'):
-                            opts = _format_options(last.get('options') or [])
-                            user_query = (
-                                f"Previous assistant reply (for context):\n"
-                                f"{last['assistant_text']}\n"
-                                + (f"\nEnumerated options:\n{opts}\n" if opts else "")
-                                + f"\nUser follow-up: {original_user_query}\n\n"
-                                  f"If this follow-up refers to an item in the previous "
-                                  f"reply, resolve it first (call history_query "
-                                  f"mode='recent' n=2 if you need more context), then "
-                                  f"call the appropriate information tool."
-                            )
 
             # --- Build messages -----------------------------------------
             _now_bdt = datetime.now(timezone(timedelta(hours=6)))
@@ -295,53 +252,7 @@ class Orchestrator:
                     **loop_kwargs,
                 )
 
-                clarification_data = None
-
                 async for event in stream_gen:
-                    if event.get("type") == "clarification_needed":
-                        clarification_data = {
-                            "question": event.get("question", ""),
-                            "options": event.get("options", []),
-                            "reason": event.get("reason", ""),
-                            "turn_id": event.get("turn_id", current_turn_id),
-                        }
-                        if user_id and self.redis_store.available:
-                            self.redis_store.set_clarification(user_id, clarification_data)
-                        # Stream the clarification question as answer_chunk
-                        # so it appears in full_response like any other answer.
-                        question_text = clarification_data["question"]
-                        if clarification_data["options"]:
-                            question_text += "\n\n" + _format_options(clarification_data["options"])
-                        for i in range(0, len(question_text), 24):
-                            yield _make_event(
-                                "answer_chunk",
-                                {"content": question_text[i:i + 24]},
-                                "both",
-                            )
-                        yield {
-                            "type": "clarification_needed",
-                            "channel": "user",
-                            "question": clarification_data["question"],
-                            "options": clarification_data["options"],
-                            "reason": clarification_data.get("reason", ""),
-                            "turn_id": clarification_data["turn_id"],
-                        }
-                        # Persist last-assistant meta with is_clarification flag
-                        # so the next turn can detect we asked for clarification.
-                        if user_id and self.redis_store.available:
-                            self.redis_store.set_last_assistant_meta(user_id, {
-                                "assistant_text": question_text,
-                                "options": clarification_data["options"],
-                                "turn_id": current_turn_id,
-                                "is_clarification": True,
-                            })
-                        yield {
-                            "type": "answer_complete",
-                            "channel": "both",
-                            "turn_id": current_turn_id,
-                        }
-                        return
-
                     yield event
 
                     if event["type"] == "answer_chunk":
@@ -383,46 +294,12 @@ class Orchestrator:
                         max_tokens=self.summarizer_max_tokens,
                     ))
 
-            except ClarificationRequested as ce:
-                clarification_data = {
-                    "question": ce.question,
-                    "options": ce.options,
-                    "reason": ce.reason,
-                    "turn_id": ce.turn_id,
-                }
-                if user_id and self.redis_store.available:
-                    self.redis_store.set_clarification(user_id, clarification_data)
-                # Stream the clarification question as answer_chunk
-                # so it appears in full_response like any other answer.
-                question_text = ce.question
-                if ce.options:
-                    question_text += "\n\n" + _format_options(ce.options)
-                for i in range(0, len(question_text), 24):
-                    yield _make_event(
-                        "answer_chunk",
-                        {"content": question_text[i:i + 24]},
-                        "both",
-                    )
+            except Exception as e:
+                logger.error(f"Error in reasoning loop: {e}", exc_info=True)
                 yield {
-                    "type": "clarification_needed",
-                    "channel": "both",
-                    "question": ce.question,
-                    "options": ce.options,
-                    "reason": ce.reason,
-                    "turn_id": ce.turn_id,
-                }
-                # Persist last-assistant meta with is_clarification flag
-                if user_id and self.redis_store.available:
-                    self.redis_store.set_last_assistant_meta(user_id, {
-                        "assistant_text": question_text,
-                        "options": ce.options,
-                        "turn_id": ce.turn_id,
-                        "is_clarification": True,
-                    })
-                yield {
-                    "type": "answer_complete",
-                    "channel": "both",
-                    "turn_id": ce.turn_id,
+                    "type": "error",
+                    "content": f"Error: {e}",
+                    "channel": "user",
                 }
 
         except Exception as e:
@@ -468,6 +345,12 @@ class Orchestrator:
 _ENUMERATED_LINE_RE = re.compile(
     r"^\s*(?:\d+[.)]|[-*•])\s+(.+)$"
 )
+
+
+def _format_options(options: List[str]) -> str:
+    if not options:
+        return ""
+    return "\n".join(f"- {o}" for o in options)
 
 
 def _extract_enumerated_options(text: str) -> List[str]:

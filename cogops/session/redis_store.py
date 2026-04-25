@@ -1,7 +1,7 @@
 """
 cogops/session/redis_store.py
 
-Redis wrapper for session: raw turns, rolling summary, pending_clarification.
+Redis wrapper for session: raw turns, rolling summary.
 """
 
 import json
@@ -23,7 +23,7 @@ except ImportError:
 
 
 class RedisSessionStore:
-    """Redis-backed session store for turns, summaries, and pending clarifications."""
+    """Redis-backed session store for turns and rolling summaries."""
 
     def __init__(self, url: Optional[str] = None, ttl_seconds: Optional[int] = None):
         if not _REDIS_AVAILABLE:
@@ -103,46 +103,6 @@ class RedisSessionStore:
             return
         key = self._key(user_id, "summary")
         self._client.delete(key)
-
-    # --- Pending Clarification ---
-    def set_clarification(self, user_id: str, q: dict) -> None:
-        if not self.available:
-            return
-        key = self._key(user_id, "clarification")
-        self._client.set(key, json.dumps(q))
-        self._client.expire(key, self.ttl)
-
-    def get_clarification(self, user_id: str) -> Optional[dict]:
-        if not self.available:
-            return None
-        key = self._key(user_id, "clarification")
-        raw = self._client.get(key)
-        return json.loads(raw) if raw else None
-
-    def clear_clarification(self, user_id: str) -> None:
-        if not self.available:
-            return
-        key = self._key(user_id, "clarification")
-        self._client.delete(key)
-
-    # --- Last assistant reply (for resolving short follow-ups like "3") ---
-    def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
-        """Store the most recent assistant reply + any enumerated options it offered.
-
-        meta = {"assistant_text": str, "options": list[str], "turn_id": str}
-        """
-        if not self.available:
-            return
-        key = self._key(user_id, "last_assistant")
-        self._client.set(key, json.dumps(meta))
-        self._client.expire(key, self.ttl)
-
-    def get_last_assistant_meta(self, user_id: str) -> Optional[dict]:
-        if not self.available:
-            return None
-        key = self._key(user_id, "last_assistant")
-        raw = self._client.get(key)
-        return json.loads(raw) if raw else None
 
     # --- Cleanup ---
     def clear_all(self, user_id: str) -> None:
