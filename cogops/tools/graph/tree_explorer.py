@@ -181,7 +181,6 @@ async def tree_explorer(query: str) -> str:
                 break
 
     # STEP 3 & 4: Fetch Edges & Deep Semantic Pruning of Branches
-    all_edge_uuids =[]
     all_episode_uuids = []
 
     for root_info in root_entities:
@@ -221,7 +220,6 @@ async def tree_explorer(query: str) -> str:
                 for ep in episodes:
                     if ep and isinstance(ep, str):
                         all_episode_uuids.append(ep)
-                        all_edge_uuids.append(ep)
                 if er.get("neighbor_uuid"):
                     all_episode_uuids.append(er["neighbor_uuid"])
                 
@@ -291,9 +289,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
         f'| Episodes: {tree_data["total_episodes"]}*\n'
     )
 
-    entity_ids = []
-    edge_ids = []
-    episode_ids =[]
 
     for entity in tree_data["entities"]:
         md_lines.append("---")
@@ -307,7 +302,7 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                 summary = summary[:150] + "..."
             md_lines.append(f"**Summary:** {summary.replace(chr(10), ' ')}\n")
 
-        entity_ids.append(entity["uuid"])
+        entity_id = entity["uuid"]
 
         relations = entity.get("relations", {})
         if not relations:
@@ -328,9 +323,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                 neighbor_uuid = edge.get("neighbor_uuid", "")
                 episode_ids_list = edge.get("episode_ids",[])
 
-                if edge_uuid:
-                    edge_ids.append(edge_uuid)
-
                 # Clean fact to prevent table breaking (remove newlines and pipes)
                 fact_display = fact.replace("\n", " ").replace("|", "/")
                 if len(fact_display) > 120:
@@ -342,7 +334,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
 
                 # Format Episodes
                 ep_cells =[]
-                episode_ids.extend(episode_ids_list)
                 for ep_id in episode_ids_list:
                     ep_summary = tree_data.get("episode_summaries", {}).get(ep_id)
                     if ep_summary:
@@ -367,17 +358,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                 md_lines.append(f"| {rel_cell} | {fact_display} | {target_cell} | {edge_id_cell} | {episodes_cell} |")
         
         md_lines.append("")
-
-    # Deduplicate Navigation IDs
-    entity_ids = list(set(entity_ids))
-    edge_ids = list(set(edge_ids))
-    episode_ids = list(set(episode_ids))
-
-    md_lines.append("---")
-    md_lines.append("*Tree Navigation IDs for the LLM to call deeper tools:*")
-    md_lines.append(f"**Entities:** {entity_ids}")
-    md_lines.append(f"**Edges:** {edge_ids}")
-    md_lines.append(f"**Episodes:** {episode_ids}")
 
     return "\n".join(md_lines)
 
