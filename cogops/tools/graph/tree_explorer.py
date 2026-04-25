@@ -299,7 +299,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
         md_lines.append("---")
         md_lines.append(f"### Entity: {entity['name']}")
         md_lines.append(f"**Node ID:** {entity['uuid']}")
-        md_lines.append(f"**Semantic Relevance:** {entity['relevance_score']}")
         summary = entity["summary"]
         if summary:
             if len(summary) > 150:
@@ -339,8 +338,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                     md_lines.append(f"  **Target Entity:** {neighbor_name}")
                 if neighbor_uuid:
                     md_lines.append(f"  **Target ID:** {neighbor_uuid}")
-                if neighbor_rel > 0:
-                    md_lines.append(f"  **Semantic Relevance:** {neighbor_rel}")
 
                 episode_ids.extend(episode_ids_list)
                 if episode_ids_list:
@@ -361,12 +358,6 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                             )
                 md_lines.append("")
         md_lines.append("")
-
-    md_lines.append("---")
-    md_lines.append("*Tree Navigation IDs for the LLM to call deeper tools:*")
-    md_lines.append(f"  Entities: {entity_ids}")
-    md_lines.append(f"  Edges: {edge_ids}")
-    md_lines.append(f"  Episodes: {episode_ids}")
 
     return "\n".join(md_lines)
 
