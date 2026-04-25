@@ -39,14 +39,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-_SHORT_FOLLOWUP_MAX_CHARS = 16
+# _SHORT_FOLLOWUP_MAX_CHARS is now read from config in __init__
 
 
-def _is_short_followup(text: str) -> bool:
+def _is_short_followup(text: str, max_chars: int = 16) -> bool:
     s = text.strip()
     if not s:
         return False
-    if len(s) <= _SHORT_FOLLOWUP_MAX_CHARS:
+    if len(s) <= max_chars:
         return True
     # Also catch patterns like "number 3", "option 2", "the second one".
     low = s.lower()
@@ -77,9 +77,9 @@ class Orchestrator:
 
         session_config = self.config.get('session', {})
         redis_url = os.getenv(session_config.get('redis_url_env', 'REDIS_URL'),
-                              "redis://localhost:6379/0")
+                              session_config.get('redis_url_default', "redis://localhost:6379/0"))
         ttl = int(os.getenv(session_config.get('ttl_seconds_env', 'REDIS_SESSION_TTL_SECONDS'),
-                            '86400'))
+                            str(session_config.get('ttl_default', 86400))))
         self.redis_store = RedisSessionStore(url=redis_url, ttl_seconds=ttl)
 
         self.tools_schema, self.raw_tool_map = build_tool_registry()
@@ -103,8 +103,7 @@ class Orchestrator:
             tm_config.get('tokenizer_model_env', 'TOKENIZER_MODEL_NAME'),
             "",
         ) or tm_config.get('tokenizer_model_default', '') \
-             or os.getenv('LLM_MODEL_NAME', '') \
-             or "Qwen/Qwen2.5-32B-Instruct"
+             or os.getenv('LLM_MODEL_NAME', '')
         self.tokenizer = Tokenizer(model_name=self._tokenizer_model_name)
 
         self.system_prompt_reservation = int(tm_config.get('system_prompt_reservation', 3500))
@@ -126,10 +125,12 @@ class Orchestrator:
     def _load_llm_call_config(self):
         self.llm_call_config = self.config.get('llm_call_parameters', {})
         self.response_templates = self.config.get('response_templates', {})
-        self.max_turns = self.config.get('reasoning', {}).get('max_turns', 10)
+        reasoning_cfg = self.config.get('reasoning', {})
+        self.max_turns = reasoning_cfg.get('max_turns', 10)
+        self.short_followup_max_chars = reasoning_cfg.get('short_followup_max_chars', 16)
         self.summarizer_max_tokens = int(os.getenv(
             self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'),
-            '300',
+            str(self.config.get('summarizer', {}).get('max_tokens_default', 300)),
         ))
 
     def _initialize_llm(self) -> AsyncLLMService:
@@ -208,7 +209,7 @@ class Orchestrator:
                         # Mark it consumed so it doesn't replay again.
                         last['is_clarification'] = False
                         self.redis_store.set_last_assistant_meta(user_id, last)
-                    elif _is_short_followup(original_user_query):
+                    elif _is_short_followup(original_user_query, self.short_followup_max_chars):
                         if last and last.get('assistant_text'):
                             opts = _format_options(last.get('options') or [])
                             user_query = (

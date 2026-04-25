@@ -12,13 +12,55 @@ Types:
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
+from cogops.config.loader import load_config
+
 logger = logging.getLogger(__name__)
+
+# Cached config
+_lookup_config: Optional[dict] = None
+
+
+def _get_lookup_config() -> dict:
+    global _lookup_config
+    if _lookup_config is None:
+        _lookup_config = load_config()
+    return _lookup_config
+
+
+def _db_name() -> str:
+    cfg = _get_lookup_config()
+    return cfg.get("neo4j", {}).get("database", "neo4j")
+
+
+def _prop_max() -> int:
+    return _get_lookup_config().get("graphiti", {}).get("max_prop_display_chars", 200)
+
+
+def _rel_cap() -> int:
+    return _get_lookup_config().get("graphiti", {}).get("max_relations_displayed", 10)
+
+
+def _fact_max() -> int:
+    return _get_lookup_config().get("graphiti", {}).get("max_fact_display_chars", 150)
+
+
+def _episode_content_max() -> int:
+    return _get_lookup_config().get("graphiti", {}).get("max_episode_display_chars", 500)
+
+
+def _snippet_max() -> int:
+    return _get_lookup_config().get("graphiti", {}).get("max_snippet_chars", 60)
 
 
 def _render_entity(entity_data: Dict[str, Any]) -> str:
     """Render an Entity node as Markdown."""
+    prop_max = _prop_max()
+    rel_cap = _rel_cap()
+    fact_max = _fact_max()
+
     lines: List[str] = []
     lines.append(f"## Entity: {entity_data.get('name', 'Unknown')}")
     lines.append(f"**UUID:** `{entity_data.get('uuid', '')}`")
@@ -33,7 +75,7 @@ def _render_entity(entity_data: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("**Properties:**")
         for k, v in props.items():
-            val = str(v)[:200] if v else ""
+            val = str(v)[:prop_max] if v else ""
             lines.append(f"  - **{k}:** {val}")
 
     # Fetch edges
@@ -49,20 +91,21 @@ def _render_entity(entity_data: Dict[str, Any]) -> str:
         for rt in sorted(grouped.keys()):
             rels = grouped[rt]
             lines.append(f"  **{rt}** ({len(rels)}):")
-            for rel in rels[:10]:  # cap display
+            for rel in rels[:rel_cap]:  # cap display
                 target = rel.get("target_name", "unknown")
                 target_uuid = rel.get("target_uuid", "")
-                fact = (rel.get("fact", "") or "")[:150]
+                fact = (rel.get("fact", "") or "")[:fact_max]
                 fact_display = fact.replace("\n", " ")
                 lines.append(f"    - {fact_display} → [{target}]({target_uuid})")
-            if len(rels) > 10:
-                lines.append(f"    ... and {len(rels) - 10} more")
+            if len(rels) > rel_cap:
+                lines.append(f"    ... and {len(rels) - rel_cap} more")
 
     return "\n".join(lines)
 
 
 def _render_episode(episode_data: Dict[str, Any]) -> str:
     """Render an Episodic node as Markdown."""
+    content_max = _episode_content_max()
     content = episode_data.get("_parsed", {})
     lines: List[str] = []
     lines.append(f"## Episode: {episode_data.get('uuid', '')}")
@@ -79,8 +122,8 @@ def _render_episode(episode_data: Dict[str, Any]) -> str:
     text = content.get("text", "")
     if text:
         lines.append("")
-        if len(text) > 500:
-            lines.append(f"**Content:** {text[:500]}...")
+        if len(text) > content_max:
+            lines.append(f"**Content:** {text[:content_max]}...")
         else:
             lines.append(f"**Content:** {text}")
 
@@ -152,7 +195,7 @@ async def _lookup_entity(driver, uuid: str) -> str:
         "e.group_id AS group_id, e.created_at AS created_at, e.labels AS labels "
         "LIMIT 1"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         result = await session.run(query, uuid=uuid)
         records = await result.data()
 
@@ -178,7 +221,7 @@ async def _lookup_entity(driver, uuid: str) -> str:
         "neighbor.summary AS target_summary "
         "LIMIT 50"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         res = await session.run(edges_query, uuid=uuid)
         edge_records = await res.data()
 
@@ -206,7 +249,7 @@ async def _lookup_episode(driver, uuid: str) -> str:
         "ep.entity_edges AS entity_edges "
         "LIMIT 1"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         result = await session.run(query, uuid=uuid)
         records = await result.data()
 
@@ -247,7 +290,7 @@ async def _lookup_edge(driver, uuid: str) -> str:
         "target.summary AS target_summary "
         "LIMIT 1"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         result = await session.run(query, uuid=uuid)
         records = await result.data()
 
@@ -276,7 +319,7 @@ async def _lookup_edge(driver, uuid: str) -> str:
                 "MATCH (ep:Episodic) WHERE ep.uuid = ep_uuid "
                 "RETURN ep.uuid AS uuid, ep.content AS content"
             )
-            async with driver.session(database="qwen34neo4j") as session:
+            async with driver.session(database=_db_name()) as session:
                 res = await session.run(ep_query, uuids=unique_eps)
                 ep_records = await res.data()
 
@@ -288,7 +331,7 @@ async def _lookup_edge(driver, uuid: str) -> str:
                         "uuid": ep_row["uuid"],
                         "category": ep_content.get("category", ""),
                         "topic": ep_content.get("topic", ""),
-                        "snippet": (ep_content.get("text", "") or "")[:60],
+                        "snippet": (ep_content.get("text", "") or "")[:_snippet_max()],
                     })
                 except (json.JSONDecodeError, TypeError):
                     pass

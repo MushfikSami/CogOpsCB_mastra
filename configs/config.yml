@@ -39,10 +39,13 @@ secondary:
     max_tokens: 2048
   spawn_subagent:
     max_turns: 5
+  extract_from_document:
+    max_doc_chars: 8000
 
 # --- Embedder (Triton Inference Server) ---
 embedder:
   url_env: "TRITON_URL"
+  url_default: "localhost:6000"
   model_name_env: "TRITON_MODEL_NAME"
   tokenizer_env: "TRITON_TOKENIZER"
   max_batch_size: 8
@@ -50,26 +53,47 @@ embedder:
 # --- Reasoning ---
 reasoning:
   max_turns: 10
+  short_followup_max_chars: 16
+  direct_stream_chars_per_chunk: 12
+  direct_stream_delay_seconds: 0.015
+
+# --- Neo4j / Graphiti ---
+neo4j:
+  database: "qwen34neo4j"
 
 # --- Graphiti tools ---
 graphiti:
   tree_explorer:
-    min_score: 0.50    # Qwen cross-encoder threshold (nodes + edges)
+    min_score: 0.5    # Qwen cross-encoder threshold (nodes + edges)
     keep_top_n: 15     # Initial candidates passed to cross-encoder
     max_edges_per_entity: 30
+  max_relations_displayed: 10
+  max_fact_display_chars: 150
+  max_prop_display_chars: 200
+  max_episode_display_chars: 500
+  max_snippet_chars: 60
+  snippet_length: 80
+  max_episodes_fetched: 200
 
 # --- History query ---
 history_query:
   default_recent_n: 3
+  ask_turns_limit: 10
+  default_max_turns: 20
 
 # --- Session / Redis ---
 session:
   redis_url_env: "REDIS_URL"
+  redis_url_default: "redis://localhost:6379/0"
   ttl_seconds_env: "REDIS_SESSION_TTL_SECONDS"
+  ttl_default: 86400
+  query_log_path: "data/query_log.jsonl"
+  query_log_retention_days: 10
 
 # --- Summarizer ---
 summarizer:
   max_tokens_env: "SUMMARIZER_MAX_TOKENS"
+  max_tokens_default: 300
 
 # --- Post-tool refine (secondary LLM condenses large tool results) ---
 # When a tool result exceeds threshold_tokens, the reasoning loop runs the
@@ -87,6 +111,7 @@ post_tool_refine:
 # summary; the remainder of max_context_tokens is the truncation budget.
 token_management:
   tokenizer_model_env: "TOKENIZER_MODEL_NAME"
+  tokenizer_model_default: "Qwen/Qwen2.5-32B-Instruct"
   system_prompt_reservation: 3500
 
 # --- LLM generation parameters (sent via extra_body to vLLM) ---

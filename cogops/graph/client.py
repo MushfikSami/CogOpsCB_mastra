@@ -16,6 +16,7 @@ from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from openai import AsyncOpenAI
 
+from cogops.config.loader import load_config
 from cogops.embedders.triton import TritonEmbedder, TritonEmbedderConfig
 from cogops.llm.reranker import QwenRerankerClient
 
@@ -28,22 +29,39 @@ logger = logging.getLogger(__name__)
 _GRAPHITI_CLIENT: Optional[Graphiti] = None
 
 
+# Module-level config cache (loaded once on first client init)
+_config: Optional[dict] = None
+
+
+def _get_config() -> dict:
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
+
+
 async def get_graphiti_client() -> Graphiti:
     global _GRAPHITI_CLIENT
     if _GRAPHITI_CLIENT is None:
+        cfg = _get_config()
+
         llm_config = LLMConfig(
             api_key=os.getenv("LLM_API_KEY", "sk-placeholder"),
             base_url=os.getenv("LLM_BASE_URL"),
             model=os.getenv("LLM_MODEL_NAME"),
-            max_tokens=150000
+            max_tokens=cfg.get("llm", {}).get("max_context_tokens", 32000)
         )
         llm_client = OpenAIGenericClient(config=llm_config)
 
+        embedder_cfg = cfg.get("embedder", {})
         triton_conf = TritonEmbedderConfig(
-            url=os.getenv("TRITON_URL", "localhost:6000"),
-            model_name=os.getenv("TRITON_MODEL_NAME", "gemma_embedding"),
-            tokenizer_path=os.getenv("TRITON_TOKENIZER", "onnx-community/embeddinggemma-300m-ONNX"),
-            max_batch_size=8
+            url=os.getenv(embedder_cfg.get("url_env", "TRITON_URL"),
+                          embedder_cfg.get("url_default", "localhost:6000")),
+            model_name=os.getenv(embedder_cfg.get("model_name_env", "TRITON_MODEL_NAME"),
+                          "gemma_embedding"),
+            tokenizer_path=os.getenv(embedder_cfg.get("tokenizer_env", "TRITON_TOKENIZER"),
+                          "onnx-community/embeddinggemma-300m-ONNX"),
+            max_batch_size=embedder_cfg.get("max_batch_size", 8)
         )
         embedder = TritonEmbedder(config=triton_conf)
 
@@ -59,11 +77,13 @@ async def get_graphiti_client() -> Graphiti:
         )
         reranker = QwenRerankerClient(client=inner_client, config=reranker_llm_config)
 
+        neo4j_cfg = cfg.get("neo4j", {})
         neo4j_driver = Neo4jDriver(
             uri=os.getenv("NEO4J_URI"),
             user=os.getenv("NEO4J_USER"),
             password=os.getenv("NEO4J_PASSWORD"),
-            database=os.getenv("NEO4J_DATABASE", "neo4j")
+            database=os.getenv(neo4j_cfg.get("database_env", "NEO4J_DATABASE"),
+                          neo4j_cfg.get("database", "neo4j"))
         )
 
         _GRAPHITI_CLIENT = Graphiti(

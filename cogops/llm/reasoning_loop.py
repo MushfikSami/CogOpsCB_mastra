@@ -35,14 +35,14 @@ from cogops.tools.answer_directly import ANSWER_DIRECTLY_SENTINEL
 # Streaming cadence for answer_directly text. The underlying model has
 # already produced the full string synchronously, so we reveal it to the
 # user in small pieces to match the chunk-by-chunk feel of normal answers.
-_DIRECT_STREAM_CHARS_PER_CHUNK = 12
-_DIRECT_STREAM_DELAY_SECONDS = 0.015
+_DEFAULT_CHARS_PER_CHUNK = 12
+_DEFAULT_DELAY_SECONDS = 0.015
 
 RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError, RuntimeError)
 
 _MISSING = object()
 
-MAX_TURNS = 10
+_DEFAULT_MAX_TURNS = 10
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ async def stream_with_tool_calls(
     messages: List[Dict[str, Any]],
     tools_schema: List[Dict[str, Any]],
     available_tools: Dict[str, Callable],
-    max_turns: int = MAX_TURNS,
+    max_turns: int = _DEFAULT_MAX_TURNS,
     extra_body: Optional[Dict[str, Any]] = None,
     user_query: str = "",
     secondary_client=None,
@@ -451,15 +451,15 @@ async def stream_with_tool_calls(
                 # Emit the text as small chunks so the UI renders it as a
                 # live stream rather than a single blob.
                 text = direct_answer_payload["text"]
-                step = _DIRECT_STREAM_CHARS_PER_CHUNK
+                step = _DEFAULT_CHARS_PER_CHUNK
                 for i in range(0, len(text), step):
                     yield _make_event(
                         "answer_chunk",
                         {"content": text[i:i + step]},
                         "both",
                     )
-                    if _DIRECT_STREAM_DELAY_SECONDS > 0:
-                        await asyncio.sleep(_DIRECT_STREAM_DELAY_SECONDS)
+                    if _DEFAULT_DELAY_SECONDS > 0:
+                        await asyncio.sleep(_DEFAULT_DELAY_SECONDS)
                 is_last_turn = True
                 yield _make_event("turn_end", {"turn_number": turn_count}, "debug")
                 return
@@ -484,10 +484,10 @@ async def stream_with_tool_calls(
                 question_text = e.question
                 if e.options:
                     question_text += "\n\n" + "\n".join(f"- {o}" for o in e.options)
-                for i in range(0, len(question_text), _DIRECT_STREAM_CHARS_PER_CHUNK * 4):
+                for i in range(0, len(question_text), _DEFAULT_CHARS_PER_CHUNK * 4):
                     yield _make_event(
                         "answer_chunk",
-                        {"content": question_text[i:i + _DIRECT_STREAM_CHARS_PER_CHUNK * 4]},
+                        {"content": question_text[i:i + _DEFAULT_CHARS_PER_CHUNK * 4]},
                         "both",
                     )
                 yield _make_event(

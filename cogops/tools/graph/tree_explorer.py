@@ -26,7 +26,29 @@ from cogops.llm.reranker import QwenRerankerClient
 from graphiti_core.llm_client.config import LLMConfig
 
 load_dotenv()
-CONFIG = load_config()
+
+# Cached config
+_tee_config: Optional[dict] = None
+
+
+def _get_tee_config() -> dict:
+    global _tee_config
+    if _tee_config is None:
+        _tee_config = load_config()
+    return _tee_config
+
+
+def _db_name() -> str:
+    return _get_tee_config().get("neo4j", {}).get("database", "neo4j")
+
+
+def _snippet_len() -> int:
+    return get_tool_config(_get_tee_config(), "tree_explorer").get("snippet_length", 80)
+
+
+def _episodes_limit() -> int:
+    return _get_tee_config().get("graphiti", {}).get("max_episodes_fetched", 200)
+
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +63,7 @@ def _parse_episode_content(content_str: str) -> Optional[Dict[str, Any]]:
             parsed = content_str
 
         text = parsed.get("text", "")
-        snippet = text[:80] if text else ""
+        snippet = text[:_snippet_len()] if text else ""
 
         return {
             "episode_id": parsed.get("passage_id", ""),
@@ -59,7 +81,7 @@ def _parse_episode_content(content_str: str) -> Optional[Dict[str, Any]]:
 # ── Graph Data Fetching ────────────────────────────────────────────────
 
 async def _fetch_entity_edges(
-    driver, entity_uuid: str, max_edges: int = 50
+    driver, entity_uuid: str, max_edges: int = 30
 ) -> List[Dict[str, Any]]:
     """Fetch all edges + neighbors for a given entity UUID."""
     query = (
@@ -70,15 +92,17 @@ async def _fetch_entity_edges(
         "neighbor.summary AS neighbor_summary "
         "LIMIT $max"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         result = await session.run(query, uuid=entity_uuid, max=max_edges)
         return await result.data()
 
 
 async def _fetch_episode_summaries(
-    driver, episode_uuids: List[str], limit: int = 200
+    driver, episode_uuids: List[str], limit: Optional[int] = None
 ) -> Dict[str, Dict[str, Any]]:
     """Batch-fetch episode summaries by UUIDs."""
+    if limit is None:
+        limit = _episodes_limit()
     if not episode_uuids:
         return {}
 
@@ -91,7 +115,7 @@ async def _fetch_episode_summaries(
         "MATCH (ep:Episodic) WHERE ep.uuid = ep_uuid "
         "RETURN ep.uuid AS episode_uuid, ep.content AS content"
     )
-    async with driver.session(database="qwen34neo4j") as session:
+    async with driver.session(database=_db_name()) as session:
         result = await session.run(query, uuids=unique_uuids)
         summaries = {}
         for row in await result.data():
@@ -110,7 +134,7 @@ async def tree_explorer(query: str) -> str:
     Uses Graphiti hybrid search for high recall, then uses Qwen deep
     semantic reranking to strictly filter paths by true relevance.
     """
-    cfg = get_tool_config(CONFIG, "tree_explorer")
+    cfg = get_tool_config(_get_tee_config(), "tree_explorer")
     min_score = cfg.get("min_score", 0.50)  # Qwen softmax threshold
     keep_top_n = cfg.get("keep_top_n", 15)  # More initial candidates since AI prunes perfectly
     max_edges_per_entity = cfg.get("max_edges_per_entity", 30)
@@ -118,7 +142,7 @@ async def tree_explorer(query: str) -> str:
     # Initialize Qwen Reranker using your custom .env variables
     reranker_base_url = os.getenv("RERANKER_BASE_URL")
     reranker_api_key = os.getenv("RERANKER_API_KEY")
-    reranker_model = os.getenv("RERANKER_MODEL_NAME", "qwen36")
+    reranker_model = os.getenv("RERANKER_MODEL_NAME") or ""
 
     # Pass the custom URL and Key to the OpenAI client
     aclient = AsyncOpenAI(

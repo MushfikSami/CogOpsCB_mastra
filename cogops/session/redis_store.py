@@ -25,14 +25,27 @@ except ImportError:
 class RedisSessionStore:
     """Redis-backed session store for turns, summaries, and pending clarifications."""
 
-    def __init__(self, url: Optional[str] = None, ttl_seconds: int = 86400):
+    def __init__(self, url: Optional[str] = None, ttl_seconds: Optional[int] = None):
         if not _REDIS_AVAILABLE:
             logger.warning("redis package not installed — RedisSessionStore is disabled.")
             self._client = None
             return
 
-        url = url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        self.ttl = ttl_seconds
+        cfg = {"session": {}}
+        try:
+            from cogops.config.loader import load_config
+            cfg = load_config()
+        except Exception:
+            pass
+        session_cfg = cfg.get("session", {})
+
+        default_url = session_cfg.get("redis_url_default", "redis://localhost:6379/0")
+        default_ttl = session_cfg.get("ttl_default", 86400)
+
+        url = url or os.getenv(session_cfg.get("redis_url_env", "REDIS_URL"), default_url)
+        self.ttl = ttl_seconds if ttl_seconds is not None else int(
+            os.getenv(session_cfg.get("ttl_seconds_env", "REDIS_SESSION_TTL_SECONDS"), str(default_ttl))
+        )
         try:
             self._client = redis.from_url(url, decode_responses=True)
             self._client.ping()

@@ -9,9 +9,28 @@ import logging
 import asyncio
 from typing import Optional
 
+from cogops.config.loader import load_config
 from cogops.session.redis_store import RedisSessionStore
 
 logger = logging.getLogger(__name__)
+
+# Cached config
+_hq_config: Optional[dict] = None
+
+
+def _get_hq_config() -> dict:
+    global _hq_config
+    if _hq_config is None:
+        _hq_config = load_config()
+    return _hq_config
+
+
+def _ask_turns_limit() -> int:
+    return _get_hq_config().get("history_query", {}).get("ask_turns_limit", 10)
+
+
+def _default_max_turns() -> int:
+    return _get_hq_config().get("history_query", {}).get("default_max_turns", 20)
 
 
 def history_query_lookup(turns: list[dict], query: str) -> str:
@@ -68,7 +87,7 @@ async def history_query_ask(
 
     turns_text = "\n---\n".join(
         f"Turn {t.get('turn_id', '?')}: User: {t.get('user', '')} | AI: {t.get('assistant', '')}"
-        for t in turns[:10]
+        for t in turns[:_ask_turns_limit()]
     )
 
     try:
@@ -117,7 +136,7 @@ async def history_query(
     if store is None or not store.available:
         return "History store not available."
 
-    turns = store.get_recent_turns(user_id, n=20)
+    turns = store.get_recent_turns(user_id, n=_default_max_turns())
 
     if mode == "lookup":
         return history_query_lookup(turns, query or "")

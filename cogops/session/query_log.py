@@ -11,9 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from cogops.config.loader import load_config
+
 # Default: CogOpsCB/data/query_log.jsonl (created if missing)
 _DEFAULT_PATH = "data/query_log.jsonl"
-_MAX_AGE_DAYS = 10
+_DEFAULT_MAX_AGE_DAYS = 10
 
 # Bangladesh Standard Time (UTC+6)
 _BDT = timezone(timedelta(hours=6))
@@ -28,10 +30,18 @@ class QueryLog:
     """Append-only query log with automatic 10-day pruning."""
 
     def __init__(self, path: Optional[str] = None):
-        self.path = Path(path or os.getenv("QUERY_LOG_PATH", _DEFAULT_PATH))
+        cfg = load_config()
+        session_cfg = cfg.get("session", {})
+        env_path = os.getenv("QUERY_LOG_PATH")
+        self.path = Path(path or env_path or session_cfg.get("query_log_path", _DEFAULT_PATH))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.touch()
+        self._max_age_days = (
+            session_cfg.get("query_log_retention_days", _DEFAULT_MAX_AGE_DAYS)
+            if path is None and env_path is None
+            else _DEFAULT_MAX_AGE_DAYS
+        )
 
     def append(self, query: str) -> None:
         """Record a query with the current Bangladesh timestamp."""
@@ -47,7 +57,7 @@ class QueryLog:
     @property
     def entries(self) -> list[dict]:
         """Return all entries within the 10-day window (prunes silently)."""
-        cutoff = _now_bdt() - timedelta(days=_MAX_AGE_DAYS)
+        cutoff = _now_bdt() - timedelta(days=self._max_age_days)
         results: list[dict] = []
         if not self.path.exists():
             return results
@@ -66,12 +76,12 @@ class QueryLog:
         return results
 
     def count(self) -> int:
-        """Number of entries within the 10-day window."""
+        """Number of entries within the retention window."""
         return len(self.entries)
 
     def _prune(self) -> None:
-        """Rewrite the file keeping only entries within the 10-day window."""
-        cutoff = _now_bdt() - timedelta(days=_MAX_AGE_DAYS)
+        """Rewrite the file keeping only entries within the retention window."""
+        cutoff = _now_bdt() - timedelta(days=self._max_age_days)
         kept: list[str] = []
         if not self.path.exists():
             return
