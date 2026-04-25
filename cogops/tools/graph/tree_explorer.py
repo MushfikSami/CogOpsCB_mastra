@@ -181,13 +181,13 @@ async def tree_explorer(query: str) -> str:
                 break
 
     # STEP 3 & 4: Fetch Edges & Deep Semantic Pruning of Branches
-    all_episode_uuids = []
+    all_episode_uuids =[]
 
     for root_info in root_entities:
         root = root_info["node"]
         edges = await _fetch_entity_edges(driver, root.uuid, max_edges=max_edges_per_entity)
 
-        edge_candidates = []
+        edge_candidates =[]
         edge_passages =[]
         
         for edge_row in edges:
@@ -238,7 +238,7 @@ async def tree_explorer(query: str) -> str:
             edges_list =[]
             for re in rel_edges:
                 er = re["edge_row"]
-                episode_ids = list(set(er.get("edge_episodes") or []))
+                episode_ids = list(set(er.get("edge_episodes") or[]))
                 episode_ids =[ep for ep in episode_ids if ep]
                 edges_list.append({
                     "edge_uuid": er.get("edge_uuid"),
@@ -289,20 +289,15 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
         f'| Episodes: {tree_data["total_episodes"]}*\n'
     )
 
-
     for entity in tree_data["entities"]:
         md_lines.append("---")
-        # Put the Node ID in the title to save lines
-        md_lines.append(f"### Entity: {entity['name']} (ID: `{entity['uuid']}`)")
+        # Removed Entity ID from title header
+        md_lines.append(f"### Entity: {entity['name']}")
         
         summary = entity["summary"]
         if summary:
-            # Truncate summary and remove linebreaks for compactness
-            if len(summary) > 150:
-                summary = summary[:150] + "..."
+            # Summary is completely visible, no truncation applied
             md_lines.append(f"**Summary:** {summary.replace(chr(10), ' ')}\n")
-
-        entity_id = entity["uuid"]
 
         relations = entity.get("relations", {})
         if not relations:
@@ -310,30 +305,26 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
             continue
 
         # --- Table Header ---
-        md_lines.append("| Relation | Fact | Target Entity (ID) | Edge ID | Episodes (ID: Topic) |")
+        # Removed Edge ID, added clean columns for Episode ID and Topic
+        md_lines.append("| Relation | Fact | Target Entity | Episode ID | Episode Topic |")
         md_lines.append("|---|---|---|---|---|")
 
         for rel_type in sorted(relations.keys()):
             edges_list = relations[rel_type]
 
             for edge in edges_list:
-                edge_uuid = edge.get("edge_uuid", "")
                 fact = edge.get("fact", "")
                 neighbor_name = edge.get("neighbor_name", "")
-                neighbor_uuid = edge.get("neighbor_uuid", "")
                 episode_ids_list = edge.get("episode_ids",[])
 
-                # Clean fact to prevent table breaking (remove newlines and pipes)
+                # Clean text to prevent table breaking (remove newlines and pipes)
                 fact_display = fact.replace("\n", " ").replace("|", "/")
-                if len(fact_display) > 120:
-                    fact_display = fact_display[:120] + "..."
+                target_cell = neighbor_name.replace("\n", " ").replace("|", "/")
+                rel_cell = rel_type.replace("\n", " ").replace("|", "/")
 
-                # Format Target Entity & ID in one cell
-                neighbor_display = neighbor_name.replace("\n", " ").replace("|", "/")
-                target_cell = f"{neighbor_display}<br>`{neighbor_uuid}`" if neighbor_uuid else neighbor_display
-
-                # Format Episodes
-                ep_cells =[]
+                # Format Episodes into separate lists for ID and Topic
+                ep_ids = []
+                ep_topics =[]
                 for ep_id in episode_ids_list:
                     ep_summary = tree_data.get("episode_summaries", {}).get(ep_id)
                     if ep_summary:
@@ -344,18 +335,18 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
                             title = ep_summary.get("snippet", "")[:30]
                         
                         title = title.replace("\n", " ").replace("|", "/")
-                        ep_cells.append(f"`{ep_id}`: {title}")
+                        ep_ids.append(f"`{ep_id}`")
+                        ep_topics.append(title)
                     else:
-                        ep_cells.append(f"`{ep_id}`")
+                        ep_ids.append(f"`{ep_id}`")
+                        ep_topics.append("-")
                 
-                # Join multiple episodes with HTML break so they stay in one table cell
-                episodes_cell = "<br>".join(ep_cells) if ep_cells else "-"
+                # Join multiple episodes with HTML break so they stay neatly in one table cell
+                episode_id_cell = "<br>".join(ep_ids) if ep_ids else "-"
+                episode_topic_cell = "<br>".join(ep_topics) if ep_topics else "-"
                 
-                rel_cell = rel_type.replace("\n", " ").replace("|", "/")
-                edge_id_cell = f"`{edge_uuid}`" if edge_uuid else "-"
-
                 # Append Row
-                md_lines.append(f"| {rel_cell} | {fact_display} | {target_cell} | {edge_id_cell} | {episodes_cell} |")
+                md_lines.append(f"| {rel_cell} | {fact_display} | {target_cell} | {episode_id_cell} | {episode_topic_cell} |")
         
         md_lines.append("")
 
