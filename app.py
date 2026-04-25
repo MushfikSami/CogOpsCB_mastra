@@ -155,7 +155,7 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                             elif evt_type == "tool_result":
                                 if tool_placeholder:
                                     content = event.get("content", "")
-                                    full_tool_log += f"**✅ Tool Result:**\n```\n{str(content)[:400]}{'...' if len(str(content)) > 400 else ''}\n```\n\n"
+                                    full_tool_log += f"**✅ Tool Result:**\n```\n{str(content)}\n```\n\n"
                                     tool_placeholder.markdown(full_tool_log)
 
                             elif evt_type == "clarification_needed":

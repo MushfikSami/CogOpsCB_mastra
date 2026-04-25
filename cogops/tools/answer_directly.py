@@ -40,8 +40,9 @@ answer_directly_tools_list = [
             "name": "answer_directly",
             "description": (
                 "Respond directly to the user WITHOUT calling any information tool. "
-                "Use ONLY for: (1) chit-chat / greetings, (2) questions about your own "
-                "identity or capabilities, (3) safety replies (deflecting political/"
+                "Use ONLY for: (1) chit-chat / greetings, (2) questions about YOUR OWN "
+                "identity or capabilities (e.g. 'who are you?'), NOT about third parties "
+                "or public figures, (3) safety replies (deflecting political/"
                 "controversial topics, de-escalating abuse, refusing illegal requests). "
                 "Never use this for factual questions about services, procedures, fees, "
                 "entities, or any information the user wants looked up."
@@ -54,7 +55,7 @@ answer_directly_tools_list = [
                         "enum": list(ANSWER_DIRECTLY_CATEGORIES),
                         "description": (
                             "chitchat = greetings/small talk; "
-                            "identity = 'who are you?' style questions; "
+                            "identity = questions about YOUR OWN identity only ('who are you?'), NOT about third parties; "
                             "safety_deflect = political/religious/controversial topics; "
                             "abuse = abusive/insulting user input (de-escalate); "
                             "illegal = dangerous/illegal requests (refuse)."

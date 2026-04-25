@@ -289,10 +289,11 @@ wikipedia_tools_list = [
         "function": {
             "name": "wikipedia_get_summary",
             "description": (
-                "Fetch the intro paragraph and last-updated date of a specific "
-                "Wikipedia page (use the exact title from wikipedia_search). "
-                "If the summary contains the answer, synthesize and reply. If "
-                "it doesn't, call `wikipedia_get_full_content` for the full page."
+                "Fetch the intro paragraph of a Wikipedia page. "
+                "**Never call this as your first tool in a turn.** "
+                "You must first call `wikipedia_search` to get the exact page title, "
+                "then use that title here. Never use a URL or raw title from the "
+                "user's message — always go through `wikipedia_search` first."
             ),
             "parameters": {
                 "type": "object",

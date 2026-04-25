@@ -16,6 +16,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
 
 import yaml
@@ -205,6 +206,10 @@ class Orchestrator:
                         )
 
             # --- Build messages -----------------------------------------
+            _now_bdt = datetime.now(timezone(timedelta(hours=6)))
+            _date_line = (
+                f"\n\nCurrent date (Bangladesh time): {_now_bdt.strftime('%d %B %Y, %A')}"
+            )
             summary = ""
             if user_id and self.redis_store.available:
                 summary = self.redis_store.get_summary(user_id)
@@ -213,7 +218,7 @@ class Orchestrator:
             )
 
             messages = [
-                {"role": "system", "content": self.system_prompt + rolling_summary_delta},
+                {"role": "system", "content": self.system_prompt + _date_line + rolling_summary_delta},
                 {"role": "user", "content": user_query},
             ]
 
