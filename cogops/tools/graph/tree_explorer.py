@@ -280,7 +280,7 @@ def tree_explorer_sync(query: str) -> str:
 # ── Markdown Rendering ─────────────────────────────────────────────────
 
 def _render_tree(tree_data: Dict[str, Any]) -> str:
-    """Convert structured tree data to Markdown."""
+    """Convert structured tree data to Markdown using token-efficient tables."""
     md_lines: List[str] =[]
 
     query = tree_data.get("query", "")
@@ -291,76 +291,95 @@ def _render_tree(tree_data: Dict[str, Any]) -> str:
         f'| Episodes: {tree_data["total_episodes"]}*\n'
     )
 
-    entity_ids =[]
+    entity_ids = []
     edge_ids = []
-    episode_ids = []
+    episode_ids =[]
 
     for entity in tree_data["entities"]:
         md_lines.append("---")
-        md_lines.append(f"### Entity: {entity['name']}")
-        md_lines.append(f"**Node ID:** {entity['uuid']}")
+        # Put the Node ID in the title to save lines
+        md_lines.append(f"### Entity: {entity['name']} (ID: `{entity['uuid']}`)")
+        
         summary = entity["summary"]
         if summary:
+            # Truncate summary and remove linebreaks for compactness
             if len(summary) > 150:
                 summary = summary[:150] + "..."
-            md_lines.append(f"**Summary:** {summary}")
+            md_lines.append(f"**Summary:** {summary.replace(chr(10), ' ')}\n")
 
         entity_ids.append(entity["uuid"])
 
         relations = entity.get("relations", {})
         if not relations:
-            md_lines.append("\n  *(No query-relevant edges found for this entity)*")
-            md_lines.append("")
+            md_lines.append("*(No query-relevant edges found for this entity)*\n")
             continue
+
+        # --- Table Header ---
+        md_lines.append("| Relation | Fact | Target Entity (ID) | Edge ID | Episodes (ID: Topic) |")
+        md_lines.append("|---|---|---|---|---|")
 
         for rel_type in sorted(relations.keys()):
             edges_list = relations[rel_type]
-            md_lines.append(f"\n#### {rel_type} ({len(edges_list)} edges)")
 
             for edge in edges_list:
                 edge_uuid = edge.get("edge_uuid", "")
                 fact = edge.get("fact", "")
                 neighbor_name = edge.get("neighbor_name", "")
                 neighbor_uuid = edge.get("neighbor_uuid", "")
-                neighbor_rel = edge.get("neighbor_relevance", 0)
                 episode_ids_list = edge.get("episode_ids",[])
 
                 if edge_uuid:
                     edge_ids.append(edge_uuid)
 
-                fact_display = fact
-                if fact_display and len(fact_display) > 120:
+                # Clean fact to prevent table breaking (remove newlines and pipes)
+                fact_display = fact.replace("\n", " ").replace("|", "/")
+                if len(fact_display) > 120:
                     fact_display = fact_display[:120] + "..."
 
-                md_lines.append(f"  **Edge ID:** {edge_uuid}")
-                md_lines.append(f"  **Fact:** {fact_display}")
-                if neighbor_name:
-                    md_lines.append(f"  **Target Entity:** {neighbor_name}")
-                if neighbor_uuid:
-                    md_lines.append(f"  **Target ID:** {neighbor_uuid}")
+                # Format Target Entity & ID in one cell
+                neighbor_display = neighbor_name.replace("\n", " ").replace("|", "/")
+                target_cell = f"{neighbor_display}<br>`{neighbor_uuid}`" if neighbor_uuid else neighbor_display
 
+                # Format Episodes
+                ep_cells =[]
                 episode_ids.extend(episode_ids_list)
-                if episode_ids_list:
-                    md_lines.append(f"  **Episodes on this edge ({len(episode_ids_list)}):**")
-                    for ep_id in episode_ids_list:
-                        ep_summary = tree_data.get("episode_summaries", {}).get(ep_id)
-                        if ep_summary:
-                            title_parts =[]
-                            if ep_summary.get("category"):
-                                title_parts.append(ep_summary["category"])
-                            if ep_summary.get("topic"):
-                                title_parts.append(ep_summary["topic"])
-                            title = "/".join(title_parts) if title_parts else ep_summary.get("snippet", "")[:40]
-                            snippet = ep_summary.get("snippet", "")[:60]
-                            md_lines.append(
-                                f"    - [Episode ID: {ep_id}] "
-                                f"{title} -- {snippet}..."
-                            )
-                md_lines.append("")
+                for ep_id in episode_ids_list:
+                    ep_summary = tree_data.get("episode_summaries", {}).get(ep_id)
+                    if ep_summary:
+                        cat = ep_summary.get("category", "")
+                        top = ep_summary.get("topic", "")
+                        title = "/".join(filter(None,[cat, top]))
+                        if not title:
+                            title = ep_summary.get("snippet", "")[:30]
+                        
+                        title = title.replace("\n", " ").replace("|", "/")
+                        ep_cells.append(f"`{ep_id}`: {title}")
+                    else:
+                        ep_cells.append(f"`{ep_id}`")
+                
+                # Join multiple episodes with HTML break so they stay in one table cell
+                episodes_cell = "<br>".join(ep_cells) if ep_cells else "-"
+                
+                rel_cell = rel_type.replace("\n", " ").replace("|", "/")
+                edge_id_cell = f"`{edge_uuid}`" if edge_uuid else "-"
+
+                # Append Row
+                md_lines.append(f"| {rel_cell} | {fact_display} | {target_cell} | {edge_id_cell} | {episodes_cell} |")
+        
         md_lines.append("")
 
-    return "\n".join(md_lines)
+    # Deduplicate Navigation IDs
+    entity_ids = list(set(entity_ids))
+    edge_ids = list(set(edge_ids))
+    episode_ids = list(set(episode_ids))
 
+    md_lines.append("---")
+    md_lines.append("*Tree Navigation IDs for the LLM to call deeper tools:*")
+    md_lines.append(f"**Entities:** {entity_ids}")
+    md_lines.append(f"**Edges:** {edge_ids}")
+    md_lines.append(f"**Episodes:** {episode_ids}")
+
+    return "\n".join(md_lines)
 
 # ── Tool Schema & Mapping ─────────────────────────────────────────────
 
