@@ -75,11 +75,14 @@ class Orchestrator:
         self.tools_schema, self.raw_tool_map = build_tool_registry()
         self.tools_desc_str = json.dumps(self.tools_schema, indent=2, ensure_ascii=False)
 
+        thinking = self.config.get('llm', {}).get('thinking', True)
         if Orchestrator._cached_system_prompt is None:
             Orchestrator._cached_system_prompt = get_graph_prompt(
                 agent_name=self.agent_name,
                 agent_story=self.agent_story,
                 tools_description=self.tools_desc_str,
+                max_concurrent_query=self.max_concurrent_query,
+                thinking=thinking,
             )
         self.system_prompt = Orchestrator._cached_system_prompt
 
@@ -118,6 +121,8 @@ class Orchestrator:
         reasoning_cfg = self.config.get('reasoning', {})
         self.max_turns = reasoning_cfg.get('max_turns', 10)
         self.short_followup_max_chars = reasoning_cfg.get('short_followup_max_chars', 16)
+        self.max_concurrent_query = reasoning_cfg.get('max_concurrent_query', 2)
+        self.max_input_chars = reasoning_cfg.get('max_input_chars', 1000)
         self.summarizer_max_tokens = int(os.getenv(
             self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'),
             str(self.config.get('summarizer', {}).get('max_tokens_default', 300)),
@@ -164,6 +169,23 @@ class Orchestrator:
         original_user_query = user_query
 
         try:
+            current_turn_id = str(uuid.uuid4())[:8]
+
+            # --- Reject gibberish / oversized input -----------------------
+            if len(user_query) > self.max_input_chars:
+                logger.warning(f"Query too long ({len(user_query)} chars), rejecting.")
+                yield {
+                    "type": "error",
+                    "content": "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।",
+                    "channel": "user",
+                }
+                yield {
+                    "type": "answer_complete",
+                    "channel": "both",
+                    "turn_id": current_turn_id,
+                }
+                return
+
             # --- Short follow-up resolution ------------------------------
             if user_id and self.redis_store.available and _is_short_followup(original_user_query, self.short_followup_max_chars):
                 last = self.redis_store.get_last_assistant_meta(user_id)
@@ -208,7 +230,6 @@ class Orchestrator:
             )
 
             full_answer_accumulator: List[str] = []
-            current_turn_id = str(uuid.uuid4())[:8]
 
             # --- Build extra_body + thinking toggle ---------------------
             thinking_mode = self.llm_call_config.get('thinking_general', {})
