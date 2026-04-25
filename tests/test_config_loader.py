@@ -90,10 +90,9 @@ class TestGetToolConfig:
         assert get_tool_config(cfg, "graph_search") == {"limit": 5, "min_score": 0.8}
 
     def test_fallback_to_flat_key(self, config_path, tmp_path):
-        """Old flat key still works."""
+        """Old flat key still works via secondary section."""
         flat_cfg = dict(yaml.safe_load(Path(config_path).read_text()))
-        flat_cfg["old_tool"] = {"limit": 42}
-        del flat_cfg["graphiti"]  # remove graphiti to test flat fallback
+        flat_cfg["secondary"]["old_tool"] = {"limit": 42}
         p = tmp_path / "flat.yml"
         p.write_text(yaml.dump(flat_cfg))
         from cogops.config.loader import load_config, get_tool_config

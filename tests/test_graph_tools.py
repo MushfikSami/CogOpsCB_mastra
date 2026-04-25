@@ -138,8 +138,6 @@ class TestToolRegistryLive:
     ], ids=lambda x: x)
     def test_tool_exists_in_registry(self, tool_name):
         from cogops.tools.registry import get_tool_names, build_tool_registry
-        tools_schema, tool_map = build_tool_registry(
-            secondary_client=None, secondary_model=""
-        )
+        tools_schema, tool_map = build_tool_registry()
         names = get_tool_names(tools_schema)
         assert tool_name in names

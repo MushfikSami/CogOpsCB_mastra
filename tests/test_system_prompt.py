@@ -27,28 +27,33 @@ class TestSystemPrompt:
 
     def test_contains_safety_tiers(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        assert "TIER 1" in prompt
-        assert "TIER 2" in prompt
-        assert "TIER 3" in prompt
+        assert "chitchat" in prompt
+        assert "identity" in prompt
+        assert "safety_deflect" in prompt
 
     def test_contains_reasoning_framework(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        # 5-phase: Analyze, Disambiguate, Plan, Act, Synthesize
-        for word in ["Analyze", "Disambiguate", "Plan", "Act", "Synthesize"]:
+        # 5-phase: Intent, Classification, Follow-up check, Plan, Synthesize
+        for word in ["Intent", "Classification", "Plan", "Synthesize"]:
             assert word in prompt, f"Missing reasoning stage: {word}"
 
     def test_contains_tool_doctrine(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        assert "Tool Usage" in prompt or "TOOL" in prompt
+        assert "tool" in prompt.lower() and "Tool selection" in prompt
 
     def test_contains_zero_hallucination(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        assert "Zero Hallucination" in prompt or "NEVER" in prompt
+        assert "Never" in prompt or "NEVER" in prompt
 
     def test_contains_neutrality(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        assert "Strict Neutrality" in prompt or "NEUTRALITY" in prompt
+        assert "strict neutrality" in prompt.lower() or "neutrality" in prompt.lower()
 
     def test_contains_official_persona(self):
         prompt = get_graph_prompt("A", "B", "[]")
-        assert "Official Persona" in prompt or "government" in prompt.lower()
+        assert "government" in prompt.lower()
+
+    def test_no_wikipedia_references(self):
+        """Verify Wikipedia tools have been removed from the prompt."""
+        prompt = get_graph_prompt("A", "B", "[]")
+        assert "wikipedia" not in prompt.lower()

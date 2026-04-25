@@ -77,16 +77,6 @@ graphiti:
   graph_stats:
     detail_level: "basic"
 
-# --- Wikipedia fallback tools ---
-# Used only when graph tools return nothing. WIKI_SEARCH_URL / WIKI_SEARCH_EMAIL
-# come from env vars; this section controls search behavior.
-wiki:
-  search_limit: 5             # default `top` for wikipedia_search (1..10)
-  chroma_top: 5               # default `top` for wikipedia_title_suggest (1..10)
-  content_char_cap: 5000      # hard cap on wikipedia_get_full_content output
-  stale_years: 2              # pages older than this are flagged ⚠️ in output
-  http_timeout_seconds: 8
-
 # --- History query ---
 history_query:
   default_recent_n: 3

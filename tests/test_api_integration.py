@@ -136,7 +136,7 @@ class TestChatStreamEndpoint:
         mock_tok = MagicMock()
         mock_tok.count = MagicMock(return_value=10)
 
-        async def _process(query, debug_mode):
+        async def _process(query, debug_mode, user_id=None):
             for e in events:
                 yield e
                 await asyncio.sleep(0)
