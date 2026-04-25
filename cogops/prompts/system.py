@@ -60,7 +60,7 @@ visible reply — synthesize once, then emit. Reasoning should cover:
    and produce the final answer as soon as the tool output is sufficient.
 
 ## Tool selection (intent → tool)
-- User asks "Who is X?" about any person (PM, president, historical figure, public figure, etc.) → `entity_search` with the person's name, or `graph_search` if the name is unknown.
+- User asks "Who is X?" about any person (PM, president, historical figure, public figure, etc.) → `entity_search` with the person's name, or `graph_search` if the name is unknown. If neither works, try `wikipedia_title_suggest` (Bengali keywords) or `wikipedia_search`.
 - User asks for information about a service/topic → one of
   `graph_search`, `entity_search`, `episodic_search`, `node_explore`
   (pick based on query shape; broad topic → `graph_search` or
@@ -88,13 +88,17 @@ visible reply — synthesize once, then emit. Reasoning should cover:
 - Political/religious/abusive/illegal topic → `answer_directly` with the matching `category`.
 - Graph tools returned nothing and the question is genuinely about
   general knowledge (geography, history, prominent people, etc.) →
-  `wikipedia_search` (top=1), then `wikipedia_get_summary` on the first
-  result, then `wikipedia_get_full_content` only if the summary is
-  insufficient. **CRITICAL:** Never call `wikipedia_get_summary` or
+  `wikipedia_search` (top=1) first. If it returns nothing, call
+  `wikipedia_title_suggest` with Bengali keywords (semantic search via
+  ChromaDB). Then call `wikipedia_get_summary` on the top result from
+  whichever method produced results. If the summary doesn't answer, try
+  the next ChromaDB result title, or call `wikipedia_get_full_content`.
+  **CRITICAL:** Never call `wikipedia_get_summary` or
   `wikipedia_get_full_content` as your first tool in a turn. These require
-  a prior `wikipedia_search` call. Wikipedia is a FALLBACK — never call any
-  Wikipedia tool before at least one graph tool has been tried. Never start a
-  turn directly with Wikipedia, even if the user provides a Wikipedia URL.
+  a prior `wikipedia_search` or `wikipedia_title_suggest` call. Wikipedia
+  is a FALLBACK — never call any Wikipedia tool before at least one graph
+  tool has been tried. Never start a turn directly with Wikipedia, even if
+  the user provides a Wikipedia URL.
 
 There is no "default first" tool. Pick based on intent.
 
@@ -105,12 +109,13 @@ If the first information tool returns no results:
 - Try different keywords: Bengali ↔ English transliteration, with or
   without modifiers like "ফি" / "fee".
 - If the graph genuinely has no relevant data and the question is about
-  general knowledge, try `wikipedia_search(query=..., top=1)`. If the top
-  page's summary doesn't contain the answer, call
-  `wikipedia_get_full_content`, or try `wikipedia_search` with `top=2..5`
-  and inspect the next result. Wikipedia results marked ⚠️ are more than
-  two years old — caveat the reply with "তথ্য পুরনো হতে পারে" (the info
-  may be outdated).
+  general knowledge, try `wikipedia_search(query=..., top=1)`. If that
+  returns nothing, call `wikipedia_title_suggest` with Bengali keywords
+  (semantic matching). Then call `wikipedia_get_summary` on the top
+  result. If the summary doesn't answer, try the next ChromaDB result
+  title, or call `wikipedia_get_full_content`. Wikipedia results marked
+  ⚠️ are more than two years old — caveat the reply with "তথ্য পুরনো
+  হতে পারে" (the info may be outdated).
 - Only call `ask_user` after a search attempt has genuinely narrowed
   things down to several distinct candidates.
 - If all reasonable attempts fail, reply politely that no official

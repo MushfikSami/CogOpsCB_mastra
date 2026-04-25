@@ -22,10 +22,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import chromadb
 import requests
 from dotenv import load_dotenv
 
 from cogops.config.loader import load_config, get_tool_config
+from cogops.embedders.triton import TritonEmbedder, TritonEmbedderConfig
 
 load_dotenv()
 
@@ -42,6 +44,17 @@ _DEFAULT_CONTENT_CAP = int(
 )
 _STALE_YEARS = int(_CONFIG.get("wiki", {}).get("stale_years", 2))
 _HTTP_TIMEOUT_SECONDS = int(_CONFIG.get("wiki", {}).get("http_timeout_seconds", 8))
+_CHROMA_TOP = int(_CONFIG.get("wiki", {}).get("chroma_top", 5))
+
+# ChromaDB / Triton settings for title-suggest fallback
+_CHROMA_DB_HOST = os.getenv("CHROMA_DB_HOST", "localhost")
+_CHROMA_DB_PORT = int(os.getenv("CHROMA_DB_PORT", "8443"))
+_WIKI_TITLE_COLLECTION = os.getenv("WIKI_TITLE_VECTOR_DB", "WikiTitles")
+_TRITON_URL = os.getenv("TRITON_URL", "localhost:6000")
+_TRITON_MODEL = os.getenv("TRITON_MODEL_NAME", "gemma_embedding")
+_TRITON_TOKENIZER = os.getenv("TRITON_TOKENIZER", "onnx-community/embeddinggemma-300m-ONNX")
+
+_QUERY_PREFIX = "task: search result | query: "
 
 _BASE_URL = os.getenv("WIKI_SEARCH_URL", _DEFAULT_BASE_URL)
 _CONTACT_EMAIL = os.getenv("WIKI_SEARCH_EMAIL", "")
@@ -231,6 +244,81 @@ def _wikipedia_get_full_content_sync(page_title: str) -> str:
     return f"Wikipedia পূর্ণ পাঠ্য পাওয়া যায়নি: '{page_title}'।"
 
 
+# --- ChromaDB-based title suggestion -----------------------------------
+
+
+def _wikipedia_title_suggest_sync(query: str, top: int) -> str:
+    """Find Wikipedia page titles via ChromaDB semantic search.
+
+    Embeds the query with the Triton embedder (using the same query prefix
+    as ingestion), then queries the WikiTitles collection.
+    """
+    cfg = get_tool_config(_CONFIG, "wiki") or {}
+    n_results = max(1, min(top or cfg.get("chroma_top", _CHROMA_TOP), 10))
+
+    # Build embedder — uses the same Gemma model as ingestion
+    triton_url = _TRITON_URL
+    if not triton_url.startswith(("http://", "https://")):
+        triton_url = f"http://{triton_url}"
+    embedder_cfg = TritonEmbedderConfig(
+        url=triton_url,
+        model_name=_TRITON_MODEL,
+        tokenizer_path=_TRITON_TOKENIZER,
+        max_batch_size=8,
+    )
+    embedder = TritonEmbedder(config=embedder_cfg)
+
+    try:
+        embedding = embedder.create_sync(_QUERY_PREFIX + (query or ""))
+    except Exception as e:
+        return f"ট্রাইটন এম্বেডিং ত্রুটি: {e}"
+
+    # Connect to ChromaDB
+    try:
+        chroma_client = chromadb.HttpClient(
+            host=_CHROMA_DB_HOST, port=_CHROMA_DB_PORT
+        )
+        chroma_client.heartbeat()
+    except Exception as e:
+        return f"ক্রোমাডিবি সংযোগ ত্রুটি: {e}"
+
+    try:
+        collection = chroma_client.get_collection(_WIKI_TITLE_COLLECTION)
+    except Exception as e:
+        return f"'{_WIKI_TITLE_COLLECTION}' সংগ্রহ পাওয়া যায়নি। {e}"
+
+    try:
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=n_results,
+            include=["metadatas"],
+        )
+    except Exception as e:
+        return f"ক্রোমাডিবি অনুসন্ধান ত্রুটি: {e}"
+
+    titles = results.get("documents", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+
+    if not titles:
+        return (
+            f"'{query}'-এর জন্য কোনো মিল পাওয়া যায়নি Wikipedia শিরোনামের "
+            f"ভেক্টর ডেটাবেজে। অনুগ্রহ করে ভিন্ন কিওয়ার্ড ব্যবহার করুন।"
+        )
+
+    out: List[str] = [f"## ভেক্টর মিল: '{query}' ({len(titles)} শিরোনাম)\n"]
+    for i, (title, dist, meta) in enumerate(zip(titles, distances, metadatas), 1):
+        out.append(
+            f"**{i}. {title}**\n"
+            f"   দূরত্ব: {dist:.4f}\n"
+        )
+        if meta:
+            source = meta.get("source", "")
+            if source:
+                out.append(f"   উৎস: {source}\n")
+    return "\n".join(out)
+
+
 # --- Async wrappers exposed to the registry ----------------------------
 
 async def wikipedia_search(query: str, top: int = 5) -> str:
@@ -243,6 +331,10 @@ async def wikipedia_get_summary(page_title: str) -> str:
 
 async def wikipedia_get_full_content(page_title: str) -> str:
     return await asyncio.to_thread(_wikipedia_get_full_content_sync, page_title)
+
+
+async def wikipedia_title_suggest(query: str, top: int = 5) -> str:
+    return await asyncio.to_thread(_wikipedia_title_suggest_sync, query, top)
 
 
 # --- Schemas -----------------------------------------------------------
@@ -328,10 +420,45 @@ wikipedia_tools_list = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "wikipedia_title_suggest",
+            "description": (
+                "Fallback: find relevant Wikipedia page titles using semantic "
+                "similarity against a pre-indexed vector database. Use ONLY when "
+                "`wikipedia_search` returns no results. Convert the user's query "
+                "into Bengali keywords before calling. Returns a ranked list of "
+                "matching Wikipedia page titles. After getting results, call "
+                "`wikipedia_get_summary` on the top result; if the summary "
+                "doesn't answer, try the next title from this list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Search keywords in Bengali (preferred). Convert "
+                            "the user's query into Bengali keywords before searching."
+                        ),
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": (
+                            "Number of titles to return (1–10). Start at 3–5."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 wikipedia_tools_map = {
     "wikipedia_search": wikipedia_search,
     "wikipedia_get_summary": wikipedia_get_summary,
     "wikipedia_get_full_content": wikipedia_get_full_content,
+    "wikipedia_title_suggest": wikipedia_title_suggest,
 }

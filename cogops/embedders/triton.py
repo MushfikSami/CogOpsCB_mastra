@@ -74,3 +74,23 @@ class TritonEmbedder(EmbedderClient):
             for text in batch:
                 results.append(self._embed_text(text))
         return results
+
+    # --- Synchronous variants (for use inside asyncio.to_thread) -------
+
+    def create_sync(self, input_data: str | list[str]) -> list[float]:
+        """Sync create — returns embedding for str, or first of list."""
+        if isinstance(input_data, str):
+            return self._embed_text(input_data)
+        elif isinstance(input_data, list):
+            batch = self.create_batch_sync(input_data)
+            return batch[0]
+        raise ValueError(f"Unsupported input type: {type(input_data)}")
+
+    def create_batch_sync(self, input_data_list: list[str]) -> list[list[float]]:
+        """Sync batch embedding — mirrors create_batch using sync client."""
+        results = []
+        for i in range(0, len(input_data_list), self.config.max_batch_size):
+            batch = input_data_list[i:i + self.config.max_batch_size]
+            for text in batch:
+                results.append(self._embed_text(text))
+        return results
