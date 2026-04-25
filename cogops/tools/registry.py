@@ -55,21 +55,11 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
     all_map: Dict[str, Callable] = {}
 
     # --- Graph tools (pure, no context injection) ---
-    from cogops.tools.graph.search import graph_search_tools_list as g1, graph_search_tools_map as g2
-    from cogops.tools.graph.entity_search import entity_search_tools_list as g3, entity_search_tools_map as g4
-    from cogops.tools.graph.entity_detail import entity_detail_tools_list as g5, entity_detail_tools_map as g6
-    from cogops.tools.graph.node_explore import node_explore_tools_list as g7, node_explore_tools_map as g8
-    from cogops.tools.graph.relation_browse import relation_browse_tools_list as g9, relation_browse_tools_map as g10
-    from cogops.tools.graph.relation_filter import relation_filter_tools_list as g11, relation_filter_tools_map as g12
-    from cogops.tools.graph.similar_entities import similar_entities_tools_list as g13, similar_entities_tools_map as g14
-    from cogops.tools.graph.path_find import path_find_tools_list as g15, path_find_tools_map as g16
-    from cogops.tools.graph.episodic_search import episodic_search_tools_list as g17, episodic_search_tools_map as g18
-    from cogops.tools.graph.graph_stats import graph_stats_tools_list as g19, graph_stats_tools_map as g20
+    from cogops.tools.graph.tree_explorer import tree_explorer_tools_list as g1, tree_explorer_tools_map as g2
+    from cogops.tools.graph.lookup import get_by_uuid_tools_list as g3, get_by_uuid_tools_map as g4
 
-    for s, m in [(g1, g2), (g3, g4), (g5, g6), (g7, g8), (g9, g10),
-                 (g11, g12), (g13, g14), (g15, g16), (g17, g18), (g19, g20)]:
-        all_schema.extend(s)
-        all_map.update(m)
+    all_schema.extend(g1); all_map.update(g2)
+    all_schema.extend(g3); all_map.update(g4)
 
     # --- Secondary-LLM tools (need secondary_client/secondary_model) ---
     from cogops.tools.secondary.grep_passage import grep_passage_tools_list as s1, grep_passage_tools_map as s2

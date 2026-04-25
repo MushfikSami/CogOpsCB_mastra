@@ -171,7 +171,7 @@ async def stream_with_tool_calls(
             # any real info tool or the answer_directly meta-tool for
             # chit-chat/identity/safety. This preserves "never answer from
             # parametric knowledge on factual queries" without pinning the
-            # model to graph_search.
+            # model to entity_search.
             # Turn 2+: the model may stop when it has enough context.
             if tools_schema and turn_count <= 1:
                 tool_choice_val = "required"
@@ -479,6 +479,17 @@ async def stream_with_tool_calls(
             from cogops.tools.ask_user import ClarificationRequested
             if isinstance(e, ClarificationRequested):
                 logger.info("ClarificationRequested raised by tool.")
+                # Stream the clarification question as answer_chunk
+                # so it appears in full_response like any other answer.
+                question_text = e.question
+                if e.options:
+                    question_text += "\n\n" + "\n".join(f"- {o}" for o in e.options)
+                for i in range(0, len(question_text), _DIRECT_STREAM_CHARS_PER_CHUNK * 4):
+                    yield _make_event(
+                        "answer_chunk",
+                        {"content": question_text[i:i + _DIRECT_STREAM_CHARS_PER_CHUNK * 4]},
+                        "both",
+                    )
                 yield _make_event(
                     "clarification_needed",
                     {

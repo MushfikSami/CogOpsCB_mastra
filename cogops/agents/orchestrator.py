@@ -31,6 +31,7 @@ from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
 from cogops.tools.ask_user import ClarificationRequested
 from cogops.utils.tokenizer import Tokenizer
 from cogops.utils.truncate import truncate_messages_to_budget
+from cogops.llm.reasoning_loop import _make_event
 
 load_dotenv()
 
@@ -190,20 +191,36 @@ class Orchestrator:
                           f"Resolve which option the user meant (by number, keyword, "
                           f"or position) and proceed. Then call the appropriate tool."
                     )
-                elif _is_short_followup(original_user_query):
+                else:
                     last = self.redis_store.get_last_assistant_meta(user_id)
-                    if last and last.get('assistant_text'):
+                    if last and last.get('is_clarification'):
+                        # Clarification was asked but the old pending key wasn't set
+                        # (or already consumed). Replay the question from meta.
+                        self.history.append((last.get('assistant_text', ''), user_query))
                         opts = _format_options(last.get('options') or [])
                         user_query = (
-                            f"Previous assistant reply (for context):\n"
-                            f"{last['assistant_text']}\n"
-                            + (f"\nEnumerated options:\n{opts}\n" if opts else "")
-                            + f"\nUser follow-up: {original_user_query}\n\n"
-                              f"If this follow-up refers to an item in the previous "
-                              f"reply, resolve it first (call history_query "
-                              f"mode='recent' n=2 if you need more context), then "
-                              f"call the appropriate information tool."
+                            f"Previous question: {last.get('assistant_text', '')}\n"
+                            + (f"Previous options:\n{opts}\n" if opts else "")
+                            + f"\nUser reply: {original_user_query}\n\n"
+                              f"Resolve which option the user meant (by number, keyword, "
+                              f"or position) and proceed. Then call the appropriate tool."
                         )
+                        # Mark it consumed so it doesn't replay again.
+                        last['is_clarification'] = False
+                        self.redis_store.set_last_assistant_meta(user_id, last)
+                    elif _is_short_followup(original_user_query):
+                        if last and last.get('assistant_text'):
+                            opts = _format_options(last.get('options') or [])
+                            user_query = (
+                                f"Previous assistant reply (for context):\n"
+                                f"{last['assistant_text']}\n"
+                                + (f"\nEnumerated options:\n{opts}\n" if opts else "")
+                                + f"\nUser follow-up: {original_user_query}\n\n"
+                                  f"If this follow-up refers to an item in the previous "
+                                  f"reply, resolve it first (call history_query "
+                                  f"mode='recent' n=2 if you need more context), then "
+                                  f"call the appropriate information tool."
+                            )
 
             # --- Build messages -----------------------------------------
             _now_bdt = datetime.now(timezone(timedelta(hours=6)))
@@ -289,6 +306,17 @@ class Orchestrator:
                         }
                         if user_id and self.redis_store.available:
                             self.redis_store.set_clarification(user_id, clarification_data)
+                        # Stream the clarification question as answer_chunk
+                        # so it appears in full_response like any other answer.
+                        question_text = clarification_data["question"]
+                        if clarification_data["options"]:
+                            question_text += "\n\n" + _format_options(clarification_data["options"])
+                        for i in range(0, len(question_text), 24):
+                            yield _make_event(
+                                "answer_chunk",
+                                {"content": question_text[i:i + 24]},
+                                "both",
+                            )
                         yield {
                             "type": "clarification_needed",
                             "channel": "user",
@@ -296,6 +324,20 @@ class Orchestrator:
                             "options": clarification_data["options"],
                             "reason": clarification_data.get("reason", ""),
                             "turn_id": clarification_data["turn_id"],
+                        }
+                        # Persist last-assistant meta with is_clarification flag
+                        # so the next turn can detect we asked for clarification.
+                        if user_id and self.redis_store.available:
+                            self.redis_store.set_last_assistant_meta(user_id, {
+                                "assistant_text": question_text,
+                                "options": clarification_data["options"],
+                                "turn_id": current_turn_id,
+                                "is_clarification": True,
+                            })
+                        yield {
+                            "type": "answer_complete",
+                            "channel": "both",
+                            "turn_id": current_turn_id,
                         }
                         return
 
@@ -349,12 +391,36 @@ class Orchestrator:
                 }
                 if user_id and self.redis_store.available:
                     self.redis_store.set_clarification(user_id, clarification_data)
+                # Stream the clarification question as answer_chunk
+                # so it appears in full_response like any other answer.
+                question_text = ce.question
+                if ce.options:
+                    question_text += "\n\n" + _format_options(ce.options)
+                for i in range(0, len(question_text), 24):
+                    yield _make_event(
+                        "answer_chunk",
+                        {"content": question_text[i:i + 24]},
+                        "both",
+                    )
                 yield {
                     "type": "clarification_needed",
                     "channel": "both",
                     "question": ce.question,
                     "options": ce.options,
                     "reason": ce.reason,
+                    "turn_id": ce.turn_id,
+                }
+                # Persist last-assistant meta with is_clarification flag
+                if user_id and self.redis_store.available:
+                    self.redis_store.set_last_assistant_meta(user_id, {
+                        "assistant_text": question_text,
+                        "options": ce.options,
+                        "turn_id": ce.turn_id,
+                        "is_clarification": True,
+                    })
+                yield {
+                    "type": "answer_complete",
+                    "channel": "both",
                     "turn_id": ce.turn_id,
                 }
 

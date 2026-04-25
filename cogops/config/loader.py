@@ -39,11 +39,9 @@ def load_config(config_path: str = "configs/config.yml") -> dict:
 def get_tool_config(config: dict, tool_name: str) -> dict:
     """
     Get tool configuration under the unified `graphiti.<tool_name>` or
-    `secondary.<tool_name>` sections. `graph_search` maps to `graphiti.search`.
+    `secondary.<tool_name>` sections.
     """
     graphiti = config.get('graphiti', {})
-    if tool_name == 'graph_search':
-        return graphiti.get('search', {})
     if tool_name in graphiti:
         return graphiti[tool_name]
     secondary = config.get('secondary', {})

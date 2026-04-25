@@ -53,29 +53,10 @@ reasoning:
 
 # --- Graphiti tools ---
 graphiti:
-  search:
-    limit: 5
-    min_score: 0.5
-  entity_search:
-    max_results: 10
-  entity_detail: {}
-  node_explore:
-    max_results: 100
-  relation_browse:
-    filter_prefix: null
-    top_n: 100
-  relation_filter:
-    max_results: 50
-  similar_entities:
-    max_results: 10
-    min_score: 0.5
-  path_find:
-    max_hops: 3
-    max_paths: 5
-  episodic_search:
-    max_results: 10
-  graph_stats:
-    detail_level: "basic"
+  tree_explorer:
+    min_score: 0.50    # Qwen cross-encoder threshold (nodes + edges)
+    keep_top_n: 15     # Initial candidates passed to cross-encoder
+    max_edges_per_entity: 30
 
 # --- History query ---
 history_query:
