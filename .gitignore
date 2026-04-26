@@ -213,3 +213,4 @@ evaluation/*
 data/*
 dockers/redis/data/*
 workspace/*
+ingestion/dataexplore/
