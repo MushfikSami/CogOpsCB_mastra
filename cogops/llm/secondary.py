@@ -1,7 +1,7 @@
 """
 cogops/llm/secondary.py
 
-One-shot secondary LLM caller. Non-streaming, used by tools (extract, delegate, subagent).
+One-shot secondary LLM caller. Non-streaming, used by tools (extract, delegate).
 """
 
 import logging

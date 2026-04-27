@@ -30,8 +30,8 @@ logger = logging.getLogger("api")
 
 # --- API Application ---
 app = FastAPI(
-    title="GovOps Graphiti API",
-    description="Government Services AI Agent backed by Neo4j Knowledge Graph.",
+    title="GovOps API",
+    description="Government Services AI Agent.",
     version="2.0.0"
 )
 
@@ -92,7 +92,7 @@ async def health_check():
     """System status and active session count."""
     return {
         "status": "online",
-        "service": "GovOps Graphiti",
+        "service": "GovOps",
         "active_sessions": len(active_sessions)
     }
 

@@ -6,8 +6,8 @@ Build the full tool registry: tools_schema + name-to-callback map.
 Tools fall into two groups:
 - pure tools whose only inputs come from the model (handled as-is)
 - context-dependent tools whose handler needs server-side state
-  (user_id, Redis store, secondary LLM client/model, full tool_map for
-  spawn_subagent). The model-visible JSON schema never exposes those;
+  (user_id, Redis store, secondary LLM client/model). The model-visible
+  JSON schema never exposes those;
   they are bound per-request via bind_tools(ctx).
 """
 
@@ -54,20 +54,12 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
     all_schema: List[Dict[str, Any]] = []
     all_map: Dict[str, Callable] = {}
 
-    # --- Graph tools (pure, no context injection) ---
-    from cogops.tools.graph.tree_explorer import tree_explorer_tools_list as g1, tree_explorer_tools_map as g2
-    from cogops.tools.graph.lookup import get_by_uuid_tools_list as g3, get_by_uuid_tools_map as g4
-
-    all_schema.extend(g1); all_map.update(g2)
-    all_schema.extend(g3); all_map.update(g4)
-
     # --- Secondary-LLM tools (need secondary_client/secondary_model) ---
     from cogops.tools.secondary.grep_passage import grep_passage_tools_list as s1, grep_passage_tools_map as s2
     from cogops.tools.secondary.extract_from_doc import extract_tools_list as s3, extract_tools_map as s4
     from cogops.tools.secondary.delegate_task import delegate_tools_list as s5, delegate_tools_map as s6
-    from cogops.tools.secondary.spawn_subagent import spawn_subagent_tools_list as s7, spawn_subagent_tools_map as s8
 
-    for s, m in [(s1, s2), (s3, s4), (s5, s6), (s7, s8)]:
+    for s, m in [(s1, s2), (s3, s4), (s5, s6)]:
         all_schema.extend(s)
         all_map.update(m)
 

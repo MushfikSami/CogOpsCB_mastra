@@ -81,7 +81,7 @@ with st.sidebar:
 
 # 2. Main Header
 st.title("DUMMY UI - Government Services Chatbot")
-st.caption("আপনার ব্যক্তিগত সরকারী সেবা সহকারী | Powered by Graphiti & GovOps AI")
+st.caption("আপনার ব্যক্তিগত সরকারী সেবা সহকারী | Powered by GovOps AI")
 
 # 3. Chat History Render Loop
 for msg in st.session_state.messages:

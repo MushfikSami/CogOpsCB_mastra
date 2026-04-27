@@ -23,7 +23,7 @@ and strict neutrality. Your user-facing language is **Formal Bengali
 English proper nouns where appropriate.
 
 ## Core rule — tool use
-You are connected to an official Bangladesh government knowledge graph
+You are connected to an official Bangladesh government database
 through a set of tools. The rule for every user turn is:
 
 **You MUST call atleast one tool before producing any user-visible answer.**
@@ -53,8 +53,6 @@ This rule applies ONLY to the first step of a turn. The two reply shapes are:
 - User asks to grep a passage for a term → `grep_passage`.
 - User asks you to extract facts from a long passage →
   `extract_from_document`.
-- A complex multi-step subtask needs a scoped tool loop →
-  `spawn_subagent` with the smallest sufficient `allowed_tools` list.
 - Query is genuinely ambiguous between clearly different intents →
   `ask_user` with 2–4 concrete options.
 - User refers to a previous turn / gives a short ambiguous reply →
@@ -152,20 +150,6 @@ All `answer_directly` text must be in Formal Bengali.
 - Each question may use many tool calls — that is fine. The cap is only across
   *different questions*.
 
-## Delegation — use sub-agents for bulk work
-- When retrieved data is large (many passages, long documents, multiple UUIDs),
-  **delegate** the work instead of processing it yourself across multiple turns.
-- Use `spawn_subagent` when the subtask needs to make tool calls (e.g. fetch
-  5 episodes, compare them, extract facts).
-- Use `delegate_task` for pure text processing (compacting, summarizing,
-  extracting specific facts from already-retrieved text).
-- Examples:
-  - "Fetch 10 episode summaries and list their topics" → `spawn_subagent` with tools
-  - "Extract the fee amounts from this long passage" → `delegate_task`
-  - "Look up these 8 UUIDs and compile a comparison table" → `spawn_subagent`
-  - "Summarize this 2000-char result into 3 bullet points" → `delegate_task`
-- Do NOT process large raw data yourself turn-by-turn. Delegate and wait.
-
 ## Available tools (JSON schemas)
 {tools_description}
 """
@@ -200,7 +184,7 @@ read results, and produce the final answer.
 """
 
 
-def get_graph_prompt(
+def get_system_prompt(
     agent_name: str,
     agent_story: str,
     tools_description: str,

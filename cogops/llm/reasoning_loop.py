@@ -499,14 +499,10 @@ async def classify(
     if not client_reranker:
         return [(p, 0.0) for p in passages]
 
-    from cogops.llm.reranker import QwenRerankerClient
-    from graphiti_core.llm_client.config import LLMConfig as RerankerLLMConfig
+    from cogops.llm.reranker import RerankerClient
 
-    reranker_llm_config = RerankerLLMConfig(
-        api_key=client_reranker.api_key or "",
-        base_url=client_reranker.base_url or "",
+    reranker = RerankerClient(
+        client=client_reranker,
         model=reranker_model or "reranker",
-        max_tokens=1,
     )
-    reranker = QwenRerankerClient(client=client_reranker, config=reranker_llm_config)
     return await reranker.rank(query, passages)

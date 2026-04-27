@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
-from cogops.prompts.system import get_graph_prompt
+from cogops.prompts.system import get_system_prompt
 from cogops.session.redis_store import RedisSessionStore
 from cogops.session.summarizer import run_summarizer_task
 from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
@@ -77,7 +77,7 @@ class Orchestrator:
 
         thinking = self.config.get('llm', {}).get('thinking', True)
         if Orchestrator._cached_system_prompt is None:
-            Orchestrator._cached_system_prompt = get_graph_prompt(
+            Orchestrator._cached_system_prompt = get_system_prompt(
                 agent_name=self.agent_name,
                 agent_story=self.agent_story,
                 tools_description=self.tools_desc_str,
