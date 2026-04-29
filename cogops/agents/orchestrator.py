@@ -17,7 +17,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
-
+import re
 import yaml
 from dotenv import load_dotenv
 
@@ -158,8 +158,9 @@ class Orchestrator:
                 f"\n\nRecent conversation summary:\n{summary}" if summary else ""
             )
 
-            # Reconstruct full recent conversation turns from Redis so the
-            # model always has the complete context, not just a summary.
+            # Reconstruct recent conversation turns from Redis.
+            # Strip reasoning/tool-log wrappers from assistant messages —
+            # only the plain answer text matters for the model's next turn.
             history_messages: List[Dict[str, str]] = []
             if user_id and self.redis_store.available:
                 turns = self.redis_store.get_recent_turns(user_id, n=4)
@@ -169,7 +170,20 @@ class Orchestrator:
                     if user_text:
                         history_messages.append({"role": "user", "content": user_text})
                     if assistant_text:
-                        history_messages.append({"role": "assistant", "content": assistant_text})
+                        # Strip <thinking>…</thinking> and Tool Logs / Reasoning
+                        # expanders to keep context lean.
+                        import re as _re
+                        clean = _re.sub(
+                            r"<thinking>.*?</thinking>\s*", "", assistant_text,
+                            flags=_re.DOTALL,
+                        )
+                        # Remove "Reasoning" / "Tool Logs" expander blocks
+                        clean = _re.sub(
+                            r"(Reasoning|Tool Logs).*?(?=\n\n|\Z)", "",
+                            clean, flags=_re.DOTALL | _re.IGNORECASE,
+                        )
+                        clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
+                        history_messages.append({"role": "assistant", "content": clean})
 
             messages = [
                 {"role": "system", "content": self.system_prompt},

@@ -215,3 +215,4 @@ dockers/redis/data/*
 workspace/*
 ingestion/dataexplore/
 dockers/*
+claude.md

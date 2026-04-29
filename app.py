@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import json
+import re
 import uuid
 import os
 
@@ -222,7 +223,20 @@ with tab_chat:
                             except json.JSONDecodeError:
                                 pass
 
-                answer_placeholder.markdown(full_response)
+                # Scan final response for image URLs and render them inline
+                _IMG_RE = re.compile(
+                    r"https?://[^\s<>'\x60\[\]{}|]+\.(?:jpg|jpeg|png|gif|webp|svg|bmp|tiff)",
+                    re.IGNORECASE,
+                )
+                seen_imgs: set[str] = set()
+                rendered = full_response
+                for m in _IMG_RE.finditer(full_response):
+                    img_url = m.group(0)
+                    low = img_url.lower()
+                    if low not in seen_imgs:
+                        seen_imgs.add(low)
+                        rendered += f"\n\n![image]({img_url})"
+                answer_placeholder.markdown(rendered, unsafe_allow_html=True)
 
                 msg_entry = {
                     "role": "assistant",
