@@ -15,8 +15,7 @@ llm:
   model_name_env: "LLM_MODEL_NAME"
   base_url_env: "LLM_BASE_URL"
   max_context_tokens: 32000
-  thinking: true
-
+  
 # --- Reranker LLM (Binary Classification) ---
 reranker:
   api_key_env: "RERANKER_API_KEY"

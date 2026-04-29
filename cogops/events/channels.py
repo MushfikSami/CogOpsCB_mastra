@@ -1,7 +1,12 @@
 """
 cogops/events/channels.py
 
-Channel filtering: filter_for_user(), filter_for_debug()
+Channel filtering helpers for the streaming event bus.
+
+Every event yielded by the reasoning loop carries a `channel` field:
+- "user"  : visible to the user only
+- "debug" : visible to debug observers only
+- "both"  : visible to both
 """
 
 from typing import Iterable, Dict, Any
@@ -21,11 +26,3 @@ def filter_for_debug(events: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any
         ch = evt.get("channel", "user")
         if ch in ("debug", "both"):
             yield evt
-
-
-def strip_channel(events: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
-    """Return events with the channel field removed (for external consumers)."""
-    for evt in events:
-        return_val = dict(evt)
-        return_val.pop("channel", None)
-        yield return_val

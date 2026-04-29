@@ -131,7 +131,7 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                             # --- New event types ---
                             if evt_type == "reasoning_chunk":
                                 if cot_placeholder:
-                                    chunk = event.get("data", "")
+                                    chunk = event.get("content", "")
                                     full_cot += chunk
                                     cot_placeholder.markdown(full_cot + "▌")
 
@@ -144,8 +144,18 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
 
                             elif evt_type == "tool_result":
                                 if tool_placeholder:
-                                    content = event.get("content", "")
-                                    full_tool_log += f"**✅ Tool Result:**\n```\n{str(content)}\n```\n\n"
+                                    name = event.get("name", "")
+                                    sources = event.get("sources", [])
+                                    preview = event.get("preview", "")
+                                    status = event.get("status", "ok")
+                                    icon = "✅" if status == "ok" else "❌"
+                                    full_tool_log += f"**{icon} Tool Result (`{name}`):**\n"
+                                    if sources:
+                                        full_tool_log += "Sources:\n"
+                                        for s in sources:
+                                            full_tool_log += f"- {s}\n"
+                                    if preview:
+                                        full_tool_log += f"Preview:\n```\n{preview}\n```\n\n"
                                     tool_placeholder.markdown(full_tool_log)
 
                             # --- Ignored debug-only structural events (silently skipped) ---

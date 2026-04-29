@@ -23,13 +23,14 @@ from dotenv import load_dotenv
 
 from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
+from cogops.llm.reasoning_loop import stream_with_tool_calls
+from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
 from cogops.prompts.system import get_system_prompt
 from cogops.session.redis_store import RedisSessionStore
 from cogops.session.summarizer import run_summarizer_task
 from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
 from cogops.utils.tokenizer import Tokenizer
 from cogops.utils.truncate import truncate_messages_to_budget
-from cogops.llm.reasoning_loop import _make_event
 
 load_dotenv()
 
@@ -60,7 +61,6 @@ class Orchestrator:
         self.tools_schema, self.raw_tool_map = build_tool_registry()
         self.tools_desc_str = json.dumps(self.tools_schema, indent=2, ensure_ascii=False)
 
-        thinking = self.config.get('llm', {}).get('thinking', True)
         if Orchestrator._cached_system_prompt is None:
             Orchestrator._cached_system_prompt = get_system_prompt(
                 agent_name=self.agent_name,
@@ -128,7 +128,6 @@ class Orchestrator:
     async def process_query(
         self,
         user_query: str,
-        debug_mode: bool = False,  # kept for API compatibility; filtering is in api.py
         user_id: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -185,8 +184,6 @@ class Orchestrator:
             ctx = self._build_tool_context(user_id)
             bound_tool_map = bind_tools(self.raw_tool_map, ctx)
 
-            from cogops.llm.reasoning_loop import stream_with_tool_calls
-
             try:
                 stream_gen = stream_with_tool_calls(
                     client_llm=self.llm_service.client_llm,
@@ -199,12 +196,12 @@ class Orchestrator:
                 )
 
                 async for event in stream_gen:
-                    # Yield debug events (tool calls, results, reasoning, etc.)
-                    if event.get("type") not in ("answer_chunk",):
-                        yield event
-
-                    # Accumulate answer chunks for final response
-                    if event["type"] == "answer_chunk":
+                    # Forward every event to the caller; the API layer filters
+                    # by channel based on the debug header. Answer chunks are
+                    # also accumulated locally so we can persist the final
+                    # response to Redis once the stream completes.
+                    yield event
+                    if event.get("type") == "answer_chunk":
                         full_answer_accumulator.append(event.get("content", ""))
 
                 final_response = "".join(full_answer_accumulator).strip()
@@ -243,18 +240,32 @@ class Orchestrator:
 
             except Exception as e:
                 logger.error(f"Error in reasoning loop: {e}", exc_info=True)
+                # The reasoning loop emits its own user-facing fallback chunk
+                # before raising; here we just log and signal completion.
                 yield {
                     "type": "error",
                     "content": f"Error: {e}",
-                    "channel": "user",
+                    "channel": "debug",
+                }
+                yield {
+                    "type": "answer_complete",
+                    "channel": "both",
+                    "turn_id": current_turn_id,
                 }
 
         except Exception as e:
-            logger.error(f"Critical Error in Orchestrator: {e}", exc_info=True)
+            logger.critical(
+                f"Unhandled error in Orchestrator.process_query: {e}",
+                exc_info=True,
+            )
             yield {
-                "type": "error",
-                "content": "একটি প্রযুক্তিগত ত্রুটির কারণে সাহায্য করতে পারছি না। অনুগ্রহ করে আবার চেষ্টা করুন।",
-                "channel": "user",
+                "type": "answer_chunk",
+                "content": SERVER_LOAD_FALLBACK_BN,
+                "channel": "both",
+            }
+            yield {
+                "type": "answer_complete",
+                "channel": "both",
             }
 
     def clear_session(self):
