@@ -199,6 +199,7 @@ async def stream_with_tool_calls(
             answer_accumulator = ""
             stripper = ThinkingStripper()
             tool_call_index_map: Dict[int, Dict[str, Any]] = {}
+            in_reasoning = False  # Track native-thinking mode (Path A)
 
             async for chunk in stream:
                 if not chunk.choices:
@@ -208,9 +209,30 @@ async def stream_with_tool_calls(
                 # Path A: provider exposes reasoning as a separate field.
                 reasoning_delta = getattr(delta, "reasoning_content", None)
                 if reasoning_delta:
+                    in_reasoning = True
                     yield _make_event(
                         "reasoning_chunk", {"content": reasoning_delta}, "debug"
                     )
+                    # DO NOT add reasoning_content to answer_accumulator — it
+                    # must never leak into the user-facing answer.
+                    continue
+
+                # If we are currently in native-thinking mode, hold back any
+                # delta.content until the thinking ends.
+                if in_reasoning:
+                    # The model switches from thinking to answer when
+                    # reasoning_content stops arriving. We detect the end
+                    # of thinking when content arrives but reasoning_content
+                    # is empty (or we hit a tool call / stop).
+                    # Qwen36 signals end-of-thinking with a special token or
+                    # by simply stopping reasoning_content. For safety, we
+                    # treat all content as answer once reasoning_content
+                    # stops for a chunk that has content.
+                    if delta.content:
+                        in_reasoning = False
+                        # Fall through to Path B to process this content.
+                    else:
+                        continue
 
                 # Path B: reasoning is inline in content via <thinking> tags.
                 if delta.content:

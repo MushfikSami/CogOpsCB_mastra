@@ -146,9 +146,10 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         full_response = ""
 
         payload = {"user_id": st.session_state.user_id, "query": prompt}
+        headers = {"X-Debug-Key": DEBUG_SECRET}
 
         try:
-            with requests.post(CHAT_ENDPOINT, json=payload, stream=True, timeout=REQUEST_TIMEOUT) as r:
+            with requests.post(CHAT_ENDPOINT, json=payload, stream=True, timeout=REQUEST_TIMEOUT, headers=headers) as r:
                 r.raise_for_status()
 
                 for line in r.iter_lines():

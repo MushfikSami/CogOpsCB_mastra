@@ -158,10 +158,27 @@ class Orchestrator:
                 f"\n\nRecent conversation summary:\n{summary}" if summary else ""
             )
 
+            # Reconstruct full recent conversation turns from Redis so the
+            # model always has the complete context, not just a summary.
+            history_messages: List[Dict[str, str]] = []
+            if user_id and self.redis_store.available:
+                turns = self.redis_store.get_recent_turns(user_id, n=4)
+                for turn in reversed(turns):  # oldest first
+                    user_text = turn.get("user", "")
+                    assistant_text = turn.get("assistant", "")
+                    if user_text:
+                        history_messages.append({"role": "user", "content": user_text})
+                    if assistant_text:
+                        history_messages.append({"role": "assistant", "content": assistant_text})
+
             messages = [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": _date_line + rolling_summary_delta + "\n\n" + user_query},
             ]
+            messages.extend(history_messages)
+            messages.append({
+                "role": "user",
+                "content": _date_line + rolling_summary_delta + "\n\n" + user_query,
+            })
 
             # Active token-budget truncation (before the first primary-LLM call).
             max_ctx = self.llm_service.max_context_tokens or 32000
@@ -182,13 +199,16 @@ class Orchestrator:
             # Pass generation parameters from config if available.
             llm_call_cfg = self.llm_call_config
             if llm_call_cfg:
-                # Qwen36 native thinking uses temperature for thinking depth
                 extra_body['temperature'] = llm_call_cfg.get('thinking_general', {}).get('temperature', 1.0)
                 extra_body['top_p'] = llm_call_cfg.get('thinking_general', {}).get('top_p', 0.95)
                 extra_body['top_k'] = llm_call_cfg.get('thinking_general', {}).get('top_k', 20)
                 extra_body['min_p'] = llm_call_cfg.get('thinking_general', {}).get('min_p', 0.0)
                 extra_body['presence_penalty'] = llm_call_cfg.get('thinking_general', {}).get('presence_penalty', 1.5)
                 extra_body['repetition_penalty'] = llm_call_cfg.get('thinking_general', {}).get('repetition_penalty', 1.0)
+                # Enable native thinking for the model.
+                if self.llm_service.llm_config and self.llm_service.llm_config.thinking:
+                    budget = self.llm_service.max_context_tokens // 2
+                    extra_body['thinking'] = {'type': 'enabled', 'budget_tokens': budget}
 
             # --- Bind tools with per-request context --------------------
             ctx = self._build_tool_context(user_id)
