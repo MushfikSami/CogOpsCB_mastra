@@ -1,11 +1,11 @@
 # LLM config
 model: "qwen36"
 api_key: "dummy key"
-base_url: "http://172.22.11.241:5000/v1"
+base_url: "http://localhost:5000/v1"
 
 # CSV
-csv_path: "data_sorted.csv"
+csv_path: "/home/vpa/CogOpsCB/ingestion/dataexplore/data_sorted.csv"
 column: "text"
 
 # Processing
-batch_size: 2
+batch_size: 10

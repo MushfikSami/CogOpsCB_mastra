@@ -82,7 +82,9 @@ search_knowledge_tools_list = [
                 "Covers জন্ম/মৃত্যু নিবন্ধন, শিক্ষা, পাসপোর্ট, ভূমি, ট্রেড লাইসেন্স, "
                 "যানবাহন, ইউটিলিটি, পেনশন, দূর্যোগ ব্যবস্থাপনা, সামাজিক সুরক্ষা, "
                 "আইন ও নিরাপত্তা, স্বাস্থ্য সহ ৩০+ সরকারি সেবা। "
-                "Use for any government service, procedure, fee, document, or regulation question."
+                "IMPORTANT: formulate the query in the most formal Bengali possible "
+                "while maintaining the user's original intent and the specific "
+                "information they need. The API handles colloquial→formal reformulation, "
             ),
             "parameters": {
                 "type": "object",
