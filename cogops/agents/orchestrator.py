@@ -26,7 +26,6 @@ from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
 from cogops.prompts.system import get_system_prompt
 from cogops.session.redis_store import RedisSessionStore
-from cogops.session.summarizer import run_summarizer_task
 from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
 from cogops.utils.tokenizer import Tokenizer
 from cogops.utils.truncate import truncate_messages_to_budget
@@ -89,8 +88,7 @@ class Orchestrator:
         self.feedback_history: List[Dict[str, Any]] = []
         self.history: List[Tuple[str, str]] = []
 
-        # Shared tokenizer: used both for active context truncation AND for the
-        # post-tool refine threshold check in the reasoning loop.
+        # Shared tokenizer: used for active context truncation
         tm_config = self.config.get('token_management', {})
         self._tokenizer_model_name = os.getenv(
             tm_config.get('tokenizer_model_env', 'TOKENIZER_MODEL_NAME'),
@@ -100,10 +98,6 @@ class Orchestrator:
         self.tokenizer = Tokenizer(model_name=self._tokenizer_model_name)
 
         self.system_prompt_reservation = int(tm_config.get('system_prompt_reservation', 3500))
-
-        refine_cfg = self.config.get('post_tool_refine', {})
-        self.post_refine_enabled = bool(refine_cfg.get('enabled', True))
-        self.post_refine_threshold = int(refine_cfg.get('threshold_tokens', 600))
 
         logger.info("GovOps Orchestrator Ready.")
 
@@ -123,28 +117,18 @@ class Orchestrator:
         self.short_followup_max_chars = reasoning_cfg.get('short_followup_max_chars', 16)
         self.max_concurrent_query = reasoning_cfg.get('max_concurrent_query', 2)
         self.max_input_chars = reasoning_cfg.get('max_input_chars', 1000)
-        self.summarizer_max_tokens = int(os.getenv(
-            self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'),
-            str(self.config.get('summarizer', {}).get('max_tokens_default', 300)),
-        ))
+        self.large_input_error = reasoning_cfg.get('large_input_error', "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।")
 
     def _initialize_llm(self) -> AsyncLLMService:
         config_llm = _load_endpoint_config(self.config, 'llm')
-        config_reranker = _load_endpoint_config(self.config, 'reranker')
-        config_secondary = _load_endpoint_config(self.config, 'secondary')
         return AsyncLLMService(
             config_llm=config_llm,
-            config_reranker=config_reranker,
-            config_secondary=config_secondary,
         )
 
     def _build_tool_context(self, user_id: Optional[str]) -> ToolContext:
         return ToolContext(
             user_id=user_id,
             store=self.redis_store,
-            secondary_client=self.llm_service.client_secondary,
-            secondary_model=(self.llm_service.llm_config.model
-                             if self.llm_service.llm_config else ""),
             tool_map=self.raw_tool_map,
             tools_schema=self.tools_schema,
         )
@@ -170,21 +154,6 @@ class Orchestrator:
 
         try:
             current_turn_id = str(uuid.uuid4())[:8]
-
-            # --- Reject gibberish / oversized input -----------------------
-            if len(user_query) > self.max_input_chars:
-                logger.warning(f"Query too long ({len(user_query)} chars), rejecting.")
-                yield {
-                    "type": "error",
-                    "content": "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।",
-                    "channel": "user",
-                }
-                yield {
-                    "type": "answer_complete",
-                    "channel": "both",
-                    "turn_id": current_turn_id,
-                }
-                return
 
             # --- Short follow-up resolution ------------------------------
             if user_id and self.redis_store.available and _is_short_followup(original_user_query, self.short_followup_max_chars):
@@ -261,15 +230,6 @@ class Orchestrator:
                     available_tools=bound_tool_map,
                     max_turns=self.max_turns,
                     extra_body=extra_body,
-                    user_query=original_user_query,
-                    secondary_client=(self.llm_service.client_secondary
-                                      if self.post_refine_enabled else None),
-                    secondary_model=(self.llm_service.llm_config.model
-                                     if (self.post_refine_enabled
-                                         and self.llm_service.llm_config) else ""),
-                    tokenizer=self.tokenizer if self.post_refine_enabled else None,
-                    refine_threshold_tokens=(self.post_refine_threshold
-                                             if self.post_refine_enabled else 0),
                     **loop_kwargs,
                 )
 
@@ -303,17 +263,6 @@ class Orchestrator:
                         "options": _extract_enumerated_options(final_response),
                         "turn_id": current_turn_id,
                     })
-
-                    asyncio.create_task(run_summarizer_task(
-                        secondary_client=self.llm_service.client_secondary,
-                        secondary_model=(self.llm_service.llm_config.model
-                                         if self.llm_service.llm_config else ""),
-                        user_id=user_id,
-                        store=self.redis_store,
-                        user_turn=original_user_query,
-                        assistant_turn=final_response,
-                        max_tokens=self.summarizer_max_tokens,
-                    ))
 
             except Exception as e:
                 logger.error(f"Error in reasoning loop: {e}", exc_info=True)

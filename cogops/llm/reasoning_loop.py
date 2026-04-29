@@ -1,7 +1,7 @@
 """
 cogops/llm/reasoning_loop.py
 
-The tool-calling while loop. Every yielded event is tagged with a channel
+The ReAct tool-calling while loop. Every yielded event is tagged with a channel
 ("user", "debug", or "both"); the API layer filters events by channel based
 on whether the caller is authenticated for debug.
 
@@ -13,14 +13,10 @@ Behaviour guarantees:
 - `answer_directly` short-circuits: its result string carries a sentinel
   that tells the loop to stream the user-facing text and end immediately,
   without feeding the tool result back for another primary-LLM pass.
-- Content deltas are streamed chunk-by-chunk on channel "user" as they
+- Content deltas are streamed chunk-by-chunk on channel "both" as they
   arrive. No end-of-turn buffering.
-- Large tool results (over a configurable token threshold) are condensed
-  through the secondary LLM before being fed back to the primary. Debug
-  stream sees both raw and refined content via `tool_result_refined`.
 """
 
-import os
 import json
 import asyncio
 import logging
@@ -77,35 +73,6 @@ def _parse_direct_answer(tool_result: str):
     return category, text
 
 
-async def _refine_tool_output(
-    secondary_client,
-    secondary_model: str,
-    user_query: str,
-    tool_name: str,
-    raw: str,
-    max_tokens: int = 1024,
-) -> str:
-    """Ask the secondary LLM to extract query-relevant bits from a bulky tool result."""
-    from cogops.llm.secondary import call_secondary
-
-    prompt = (
-        "Extract only the parts of the tool output below that are relevant to the "
-        "user's query. Keep the same language as the raw output.\n\n"
-        f"User query: {user_query}\n"
-        f"Tool: {tool_name}\n"
-        f"Raw output:\n{raw}\n\n"
-        "Return a tight, structured excerpt. If nothing is relevant, return exactly: "
-        "NO_RELEVANT_DATA."
-    )
-    return await call_secondary(
-        secondary_client,
-        secondary_model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.2,
-    )
-
-
 @retry(
     wait=wait_exponential(multiplier=1, min=1, max=10),
     stop=stop_after_attempt(3),
@@ -120,26 +87,19 @@ async def stream_with_tool_calls(
     available_tools: Dict[str, Callable],
     max_turns: int = _DEFAULT_MAX_TURNS,
     extra_body: Optional[Dict[str, Any]] = None,
-    user_query: str = "",
-    secondary_client=None,
-    secondary_model: str = "",
-    tokenizer=None,
-    refine_threshold_tokens: int = 0,
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Orchestrates the conversation using the primary LLM endpoint.
+    Orchestrates the ReAct conversation using the primary LLM endpoint.
 
     Stream-friendly: text deltas are yielded as `answer_chunk` events on
-    channel "user" as they arrive. Reasoning, tool calls, tool results,
+    channel "both" as they arrive. Reasoning, tool calls, tool results,
     and token usage are yielded on channel "debug".
 
-    Args:
-        user_query: the original user turn (used by the post-tool refiner
-                    to decide relevance).
-        secondary_client / secondary_model / tokenizer / refine_threshold_tokens:
-                    control the post-tool secondary-LLM refine step. If any
-                    is missing or `refine_threshold_tokens<=0`, refine is off.
+    The model operates in a Thought-Action-Observation loop:
+    - THOUGHT: classifies intent, decides which tool to call
+    - ACTION: the model calls exactly one tool
+    - OBSERVATION: the tool result is fed back; model decides if answer is complete
     """
     extra_body = dict(extra_body or {})
     vllm_params = ("repetition_penalty", "top_k", "top_p")
@@ -149,10 +109,6 @@ async def stream_with_tool_calls(
 
     # Capture usage in the final streaming chunk.
     extra_body.setdefault("stream_options", {"include_usage": True})
-
-    post_refine_enabled = bool(
-        secondary_client and secondary_model and tokenizer and refine_threshold_tokens > 0
-    )
 
     turn_count = 0
     reasoning_accumulator = ""
@@ -167,11 +123,7 @@ async def stream_with_tool_calls(
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
-            # Turn 1: force the model to pick SOME tool. It can freely choose
-            # any real info tool or the answer_directly meta-tool for
-            # chit-chat/identity/safety. This preserves "never answer from
-            # parametric knowledge on factual queries" without pinning the
-            # model to entity_search.
+            # Turn 1: force the model to pick SOME tool.
             # Turn 2+: the model may stop when it has enough context.
             if tools_schema and turn_count <= 1:
                 tool_choice_val = "required"
@@ -191,10 +143,6 @@ async def stream_with_tool_calls(
             full_content_accumulator = ""
             tool_call_index_map: Dict[int, Dict[str, Any]] = {}
             stream_usage: Dict[str, Any] = {}
-            # Content deltas are streamed live; if this turn also emits
-            # tool_calls (rare with vLLM+Qwen), the streamed content becomes
-            # part of the assistant message but is not the final answer. We
-            # flag that so the caller can ignore it.
             streamed_content_this_turn = False
 
             async for chunk in stream:
@@ -246,8 +194,6 @@ async def stream_with_tool_calls(
                             tool_call_index_map[index]["function"]["arguments"] += tc_delta.function.arguments
 
             if reasoning_accumulator:
-                # No final-flush event — each reasoning chunk was already
-                # streamed above; clear the accumulator for the next turn.
                 reasoning_accumulator = ""
 
             if stream_usage:
@@ -263,9 +209,6 @@ async def stream_with_tool_calls(
             if tool_calls_list:
                 response_message["tool_calls"] = tool_calls_list
                 if streamed_content_this_turn:
-                    # Content should not have been user-facing on a tool-calling
-                    # turn. Mark it in debug; user already saw the chunks, which
-                    # is tolerable in practice (vLLM+Qwen don't interleave).
                     logger.debug(
                         "Content streamed on a tool-calling turn — should be rare."
                     )
@@ -274,11 +217,7 @@ async def stream_with_tool_calls(
 
             if not tool_calls_list:
                 # Model produced a final answer without a tool call.
-                # Because we force tool_choice="required" on turn 1, this only
-                # happens on turn 2+ when the model has enough tool context
-                # and is wrapping up.
                 if turn_count <= 1 and tools_schema:
-                    # Shouldn't happen (tool_choice=required). Defensive reminder.
                     logger.warning(
                         "No tool call emitted on turn 1 despite tool_choice='required'."
                     )
@@ -324,8 +263,6 @@ async def stream_with_tool_calls(
                             if asyncio.iscoroutinefunction(function_to_call):
                                 response_data = await function_to_call(**function_args)
                             else:
-                                # functools.partial around a coroutine still reports False for iscoroutinefunction;
-                                # detect the underlying function.
                                 inner = getattr(function_to_call, "func", function_to_call)
                                 if asyncio.iscoroutinefunction(inner):
                                     response_data = await function_to_call(**function_args)
@@ -350,7 +287,6 @@ async def stream_with_tool_calls(
                         "category": direct[0],
                         "text": direct[1],
                     }
-                    # Don't refine, don't feed back.
                     yield _make_event(
                         "tool_result",
                         {
@@ -362,8 +298,6 @@ async def stream_with_tool_calls(
                         },
                         "debug",
                     )
-                    # Still append a synthetic tool message so the transcript is
-                    # well-formed (not strictly needed since we break next).
                     messages.append({
                         "tool_call_id": call_id,
                         "role": "tool",
@@ -372,49 +306,7 @@ async def stream_with_tool_calls(
                     })
                     break  # out of the tool loop
 
-                # Optional secondary-LLM refine for large results.
-                if (
-                    post_refine_enabled
-                    and not tool_result_content.startswith("Error")
-                    and not tool_result_content.startswith("System Error")
-                    and tokenizer is not None
-                    and tokenizer.count(tool_result_content) > refine_threshold_tokens
-                ):
-                    raw = tool_result_content
-                    try:
-                        refined = await _refine_tool_output(
-                            secondary_client=secondary_client,
-                            secondary_model=secondary_model,
-                            user_query=user_query,
-                            tool_name=function_name,
-                            raw=raw,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Refine failed for {function_name}: {e}")
-                        refined = ""
-
-                    if refined and refined.strip() and refined.strip() != "NO_RELEVANT_DATA":
-                        tool_result_content = refined
-                        yield _make_event(
-                            "tool_result_refined",
-                            {
-                                "call_id": call_id,
-                                "raw": raw,
-                                "refined": tool_result_content,
-                            },
-                            "debug",
-                        )
-                    else:
-                        yield _make_event(
-                            "tool_result_refined",
-                            {
-                                "call_id": call_id,
-                                "raw": raw,
-                                "refined": raw,
-                                "note": "refine returned no relevant data; keeping raw",
-                            },
-                            "debug",
-                        )
+                # No post-tool refine (secondary LLM removed).
 
                 elapsed_ms = round((time.time() - start_time) * 1000)
                 yield _make_event(
@@ -445,8 +337,6 @@ async def stream_with_tool_calls(
                     },
                     "debug",
                 )
-                # Emit the text as small chunks so the UI renders it as a
-                # live stream rather than a single blob.
                 text = direct_answer_payload["text"]
                 step = _DEFAULT_CHARS_PER_CHUNK
                 for i in range(0, len(text), step):
@@ -487,22 +377,3 @@ async def stream_with_tool_calls(
         logger.info(
             f"Reached max turns ({max_turns}) without a final answer."
         )
-
-
-async def classify(
-    client_reranker: Optional[AsyncOpenAI],
-    reranker_model: str,
-    query: str,
-    passages: List[str],
-) -> List[tuple]:
-    """Use reranker endpoint for binary classification of passages."""
-    if not client_reranker:
-        return [(p, 0.0) for p in passages]
-
-    from cogops.llm.reranker import RerankerClient
-
-    reranker = RerankerClient(
-        client=client_reranker,
-        model=reranker_model or "reranker",
-    )
-    return await reranker.rank(query, passages)

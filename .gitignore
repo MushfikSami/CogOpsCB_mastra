@@ -214,3 +214,4 @@ data/*
 dockers/redis/data/*
 workspace/*
 ingestion/dataexplore/
+dockers/*

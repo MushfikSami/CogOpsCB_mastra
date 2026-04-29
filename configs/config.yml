@@ -58,6 +58,7 @@ reasoning:
   direct_stream_delay_seconds: 0.015
   max_concurrent_query: 2
   max_input_chars: 1000
+  large_input_error: "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।"
 
 # --- Neo4j / Graphiti ---
 neo4j:
@@ -104,6 +105,10 @@ summarizer:
 post_tool_refine:
   enabled: true
   threshold_tokens: 600
+
+# --- Knowledge search defaults ---
+knowledge_search:
+  top_k_default: 10
 
 # --- Token & prompt management ---
 # tokenizer_model_env: env var that names a HuggingFace model whose tokenizer

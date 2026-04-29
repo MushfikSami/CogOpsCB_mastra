@@ -107,10 +107,17 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = Header(
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
+    # --- Pre-filter: length check (before creating agent session) ---
+    agent = await get_agent_session(request.user_id)
+    max_chars = agent.max_input_chars
+    large_error = agent.large_input_error
+    if len(request.query) > max_chars:
+        yield json.dumps({"type": "error", "content": large_error, "channel": "user"}) + "\n"
+        yield json.dumps({"type": "answer_complete", "channel": "both"}) + "\n"
+        return
+
     # Log the incoming query (text + timestamp only, nothing else).
     _query_log.append(request.query)
-
-    agent = await get_agent_session(request.user_id)
     server_debug_secret = os.getenv("ADMIN_DEBUG_SECRET")
     debug_mode = (server_debug_secret is not None) and (x_debug_key == server_debug_secret)
 

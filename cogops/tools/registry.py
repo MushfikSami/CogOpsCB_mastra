@@ -62,14 +62,14 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
     all_schema.extend(k1)
     all_map.update(k2)
 
-    # --- Secondary-LLM tools (need secondary_client/secondary_model) ---
-    from cogops.tools.secondary.grep_passage import grep_passage_tools_list as s1, grep_passage_tools_map as s2
-    from cogops.tools.secondary.extract_from_doc import extract_tools_list as s3, extract_tools_map as s4
-    from cogops.tools.secondary.delegate_task import delegate_tools_list as s5, delegate_tools_map as s6
-
-    for s, m in [(s1, s2), (s3, s4), (s5, s6)]:
-        all_schema.extend(s)
-        all_map.update(m)
+    
+    # --- Wiki search tool ---
+    from cogops.tools.search_wiki import (
+        search_wiki_tools_list as w1,
+        search_wiki_tools_map as w2,
+    )
+    all_schema.extend(w1)
+    all_map.update(w2)
 
     # --- Interaction tools ---
     from cogops.tools.ask_user import ask_user_tools_list as i1, ask_user_tools_map as i2

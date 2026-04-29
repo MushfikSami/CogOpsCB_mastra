@@ -16,6 +16,7 @@ ANSWER_DIRECTLY_CATEGORIES = (
     "safety_deflect",
     "abuse",
     "illegal",
+    "no_info_found",
 )
 
 ANSWER_DIRECTLY_SENTINEL = "__ANSWER_DIRECTLY__"
@@ -58,7 +59,8 @@ answer_directly_tools_list = [
                             "identity = questions about YOUR OWN identity only ('who are you?'), NOT about third parties; "
                             "safety_deflect = political/religious/controversial topics; "
                             "abuse = abusive/insulting user input (de-escalate); "
-                            "illegal = dangerous/illegal requests (refuse)."
+                            "illegal = dangerous/illegal requests (refuse); "
+                            "no_info_found = both search_knowledge and search_wiki returned no results (reply politely in Bengali that no information is available)."
                         ),
                     },
                     "text": {
