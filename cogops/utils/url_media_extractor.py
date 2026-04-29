@@ -125,20 +125,15 @@ def extract_urls_media(text: str, source: str = "wikipedia") -> List[Dict[str, A
         page_url_match = _URL_RE.search(nearby)
         if page_url_match and "wikipedia" in page_url_match.group(0).lower():
             page_url = page_url_match.group(0)
-            # Encode filename: spaces → _, Bengali → URL-encoded
+            # Encode filename: spaces → _, keep Bengali chars unencoded
             safe_name = filename.replace(" ", "_")
-            safe_name = _url_encode(safe_name)
 
             if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".tiff"):
                 if source == "wikipedia":
                     # Build Wikipedia page URL with media anchor:
-                    # https://bn.wikipedia.org/wiki/Mohammed_Shahabuddin#/media/চিত্র:Filename.jpg
-                    media_anchor = _url_encode(f"চিত্র:{filename}")
-                    # Insert #/media/ before the last path segment if no anchor exists
-                    if "#" not in page_url:
-                        wiki_url = f"{page_url}#/media/{media_anchor}"
-                    else:
-                        wiki_url = f"{page_url}#/media/{media_anchor}"
+                    # https://bn.wikipedia.org/wiki/Page#/media/চিত্র:Filename_Jpg
+                    media_anchor = f"চিত্র:{safe_name}"
+                    wiki_url = f"{page_url}#/media/{media_anchor}"
                     _add(wiki_url, typ)
                 else:
                     # Jiggasha or unknown — try Wikimedia upload URL

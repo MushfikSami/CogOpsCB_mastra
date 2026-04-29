@@ -56,8 +56,9 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
         if combined:
             context.append(f"Context:\n{combined}")
 
-        # Add results metadata for reference
-        sources =[]
+        # Collect result URLs for Media Links extraction and sources
+        sources = []
+        result_urls = []
         if results:
             for i, r in enumerate(results, 1):
                 title = r.get("title", "Untitled")
@@ -66,9 +67,12 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
                 sources.append(
                     f"{i}. [{title}]({url})" + (f" (updated: {pub})" if pub else "")
                 )
+                if url:
+                    result_urls.append(url)
 
         # Extract URLs and check status, append as "Media Links" to context
-        all_text = "\n".join(context)
+        # Include result URLs in text so wiki file refs can be resolved
+        all_text = "\n".join(context + result_urls)
         try:
             extracted = extract_urls_media(all_text, source="wikipedia")
             if extracted:
@@ -77,6 +81,9 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
                 for m in media_items:
                     status = m.get("status", "?")
                     u = m.get("url", "")
+                    # Skip items that aren't real URLs
+                    if not u.startswith("http://") and not u.startswith("https://"):
+                        continue
                     typ = m.get("type", "?")
                     extra = ""
                     if "redirect_to" in m:

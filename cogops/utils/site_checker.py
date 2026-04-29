@@ -119,8 +119,8 @@ async def _check_one(
 ) -> None:
     """Check a single URL and mutate item in-place with status."""
     url = item.get("url", "")
-    if not url:
-        item["status"] = "error: no URL"
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        item["status"] = "error: not a URL"
         return
 
     # Wikipedia / Wikimedia URLs: already confirmed alive by the search

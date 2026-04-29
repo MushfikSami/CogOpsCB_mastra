@@ -96,6 +96,8 @@ async def search_knowledge(formal_query: str, keyword_string: str) -> Tuple[Unio
                 for m in media_items:
                     status = m.get("status", "?")
                     u = m.get("url", "")
+                    if not u.startswith("http://") and not u.startswith("https://"):
+                        continue
                     typ = m.get("type", "?")
                     extra = ""
                     if "redirect_to" in m:
