@@ -1,16 +1,7 @@
-"""
-cogops/tools/search_wiki.py
-
-search_wiki: query the Bangladesh-focused Wikipedia search API for general knowledge
-passages. Returns formatted context with article titles, URLs, and published dates.
-
-The agent only sees combined_context as the observation.
-Results metadata (title, url, published_at) is logged in debug mode.
-"""
-
 import os
 import logging
 import httpx
+from typing import Tuple, List, Union
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +11,23 @@ WIKI_ENDPOINT = os.getenv(
 )
 
 
-async def search_wiki(formal_query: str, keyword_string: str) -> str:
+async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str, List[str]], List[str]]:
     """
     Search the Bangladesh-focused Wikipedia database for general knowledge passages.
 
     Args:
         formal_query: The question in formal Bengali, expressing the exact information sought.
+            Example: "বর্তমানে বাংলাদেশ সরকারে রাষ্ট্রপতি হিসেবে যিনি দায়িত্ব পালন করছেন তার নাম কি ?"
         keyword_string: Space-separated Bengali keywords (3-8 words) extracted from the query.
+            Example: "বর্তমান রাষ্ট্রপতি বাংলাদেশ সরকার দায়িত্ব"
+
+    Returns:
+        A tuple containing:
+        - formatted text with combined_context (the answer/observation)
+        - list of source references (metadata for logs)
     """
     if not formal_query or not keyword_string:
-        return "No query or keywords provided."
+        return "No query or keywords provided.",[]
 
     try:
         url = _get_endpoint()
@@ -41,36 +39,36 @@ async def search_wiki(formal_query: str, keyword_string: str) -> str:
             resp = await client.post(url, json=payload)
 
         if resp.status_code != 200:
-            return f"Wiki search failed (HTTP {resp.status_code}): {resp.text}"
+            return f"Wiki search failed (HTTP {resp.status_code}): {resp.text}",[]
 
         data = resp.json()
         combined = data.get("combined_context", "")
-        results = data.get("results", [])
+        results = data.get("results",[])
 
         if not combined and not results:
-            return "No relevant results found."
+            return "No relevant results found.",[]
 
         # Format: show combined_context first (what the agent sees as observation)
-        lines = [f"Query: {formal_query}"]
+        context = [f"Query: {formal_query}"]
         if combined:
-            lines.append(f"Context:\n{combined}")
+            context.append(f"Context:\n{combined}")
 
         # Add results metadata for reference
+        sources =[]
         if results:
-            lines.append("\n--- Results ---")
             for i, r in enumerate(results, 1):
                 title = r.get("title", "Untitled")
                 url = r.get("url", "")
                 pub = r.get("published_at", "")
-                lines.append(
+                sources.append(
                     f"{i}. [{title}]({url})" + (f" (updated: {pub})" if pub else "")
                 )
-
-        return "\n\n".join(lines)
+        
+        return context, sources
 
     except Exception as e:
         logger.error(f"search_wiki error: {e}")
-        return f"Wiki search error: {e}"
+        return f"Wiki search error: {e}",[]
 
 
 def _get_endpoint() -> str:
@@ -80,7 +78,7 @@ def _get_endpoint() -> str:
     )
 
 
-search_wiki_tools_list = [
+search_wiki_tools_list =[
     {
         "type": "function",
         "function": {
@@ -91,30 +89,38 @@ search_wiki_tools_list = [
                 "current events), world events, public figures, or general knowledge not "
                 "specific to government procedures. This is the fallback when "
                 "search_knowledge returns no results for a government service query, and "
-                "the primary choice for non-government general knowledge questions. "
-                "The API returns LLM-extracted excerpts (only the most relevant lines from "
-                "each article) — the combined_context field contains all excerpts joined "
-                "together, already filtered to minimize token usage. "
-                "The results array (visible in debug logs) contains article titles, URLs, "
-                "and published_at timestamps for reference."
-                "\n\n"
-                "Parameters:\n"
-                "- formal_query: Write the exact question you need answered in formal Bengali (বাংলা). "
-                "Use proper Bengali vocabulary and tone.\n"
-                "- keyword_string: Space-separated Bengali keywords (3-8 words) extracted from your "
-                "query. These are the key terms that appear in the database text. Pipe-separated "
-                "keywords also work."
+                "the primary choice for non-government general knowledge questions.\n\n"
+                "Parameters Guidelines:\n"
+                "When a user asks a colloquial, informal, or English-mixed question, you MUST translate it into formal Wikipedia terminology.\n"
+                "For example, 'আইসিটি মিনিস্ট্রি' should be translated to the formal 'তথ্য ও যোগাযোগ প্রযুক্তি মন্ত্রনালয়'.\n\n"
+                "Furthermore, you must infer implicit context and use standard Wikipedia phrasing.\n"
+                "For example, if the user asks: 'বাংলাদেশের প্রেসিডেন্ট কে?'\n"
+                "- formal_query: Write the exact question representing the absolute information sought, using formal words and tones aware of Wikipedia structures. "
+                "Example translation: 'বর্তমানে বাংলাদেশ সরকারে রাষ্ট্রপতি হিসেবে যিনি দায়িত্ব পালন করছেন তার নাম কি ?'\n"
+                "- keyword_string: Provide a space-separated list of words related to the query. "
+                "Since the question does not specify a past date, it means the CURRENT president, so we include 'বর্তমান'. "
+                "Also, Wikipedia pages often use phrases like 'তিনি বর্তমানে অমুক পদে দায়িত্ব পালন করছেন', so we include the word 'দায়িত্ব'. "
+                "Example translation: 'বর্তমান রাষ্ট্রপতি বাংলাদেশ সরকার দায়িত্ব'\n\n"
+                "Note: Pipe-separated keywords also work."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "formal_query": {
                         "type": "string",
-                        "description": "The question in formal Bengali, expressing the exact information sought.",
+                        "description": (
+                            "The exact question representing the absolute information sought. "
+                            "Write in proper formal Bengali (বাংলা) mimicking the tone and nature of Wikipedia pages. "
+                            "Example: 'বর্তমানে বাংলাদেশ সরকারে রাষ্ট্রপতি হিসেবে যিনি দায়িত্ব পালন করছেন তার নাম কি ?'"
+                        ),
                     },
                     "keyword_string": {
                         "type": "string",
-                        "description": "Space-separated Bengali keywords (3-8 words) extracted from the query.",
+                        "description": (
+                            "Space-separated Bengali keywords (3-8 words) related to the query. "
+                            "Include implicit contextual words (like 'বর্তমান') and typical Wikipedia terminology (like 'দায়িত্ব'). "
+                            "Example: 'বর্তমান রাষ্ট্রপতি বাংলাদেশ সরকার দায়িত্ব'"
+                        ),
                     },
                 },
                 "required": ["formal_query", "keyword_string"],
