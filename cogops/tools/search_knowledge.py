@@ -4,7 +4,7 @@ import httpx
 from typing import Tuple, List, Union
 
 from cogops.utils.url_media_extractor import extract_urls_media
-from cogops.utils.site_checker import check_urls
+from cogops.utils.site_checker import check_urls, replace_webpage_urls_in_text
 
 from cogops.config.loader import load_config
 
@@ -92,6 +92,13 @@ async def search_knowledge(formal_query: str, keyword_string: str) -> Tuple[Unio
             extracted = extract_urls_media(all_text, source="jiggasha")
             if extracted:
                 media_items = await check_urls(extracted)
+                # Replace webpage URLs in context with verified versions
+                all_text = replace_webpage_urls_in_text(all_text, extracted, media_items)
+                # Rebuild context parts from the replaced text.
+                # Context was: [Query: ..., Retrieved Context:\ncombined...]
+                parts = all_text.split("\n", 1)
+                query_part = parts[0] if parts[0].startswith("Query:") else f"Query: {formal_query}"
+                context = [query_part, parts[1]] if len(parts) > 1 else [query_part]
                 media_lines = ["\n## Media Links"]
                 for m in media_items:
                     status = m.get("status", "?")

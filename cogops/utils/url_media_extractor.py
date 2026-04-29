@@ -17,6 +17,10 @@ import re
 from typing import List, Dict, Any, Literal
 from urllib.parse import quote
 
+# Heuristic: Wikipedia filenames often have dates like "(February 17 2026)"
+# but the actual file on Wikimedia uses "(February 17, 2026)" — comma before year.
+# This fixes the common pattern: non-digit-space-4digit → insert comma.
+
 # Well-known file extensions → type label
 _FILE_EXTENSIONS: Dict[str, str] = {
     ".pdf": "pdf",
@@ -58,7 +62,7 @@ def _url_encode(s: str) -> str:
 
 
 _URL_RE = re.compile(
-    r"https?://[^\s<>'‘’“”\x60()\[\]{}|]+",
+    r"https?://[^\s<>'\x60\[\]{}|]+",
     re.IGNORECASE,
 )
 
@@ -75,6 +79,52 @@ _STANDALONE_FILE_RE = re.compile(
     r'\b(\S+\.(?:pdf|docx?|xlsx?|pptx?|zip|tar|gz|rar|7z|jpe?g|png|gif|webp|svg|bmp|tiff|mp4|avi|mkv|mov|wav|mp3|ogg))',
     re.IGNORECASE,
 )
+
+
+def _fuzzy_lookup_filename(bare_name: str, text: str) -> str:
+    """
+    Given a filename from a [[File:]] ref, search the text for the actual
+    filename with correct punctuation. Wikipedia's backend may strip
+    commas/punctuation from filenames in rendered text.
+
+    Strategy: extract only letters and digits from bare_name to build a
+    regex pattern. Between each letter/digit, allow any characters
+    (commas, spaces, punctuation, etc.). This naturally matches
+    "Name_(Feb 17 2026).jpg" against "Name_(Feb 17, 2026).jpg" because
+    only the letters/digits are fixed — the stuff between is wild.
+    """
+    def _key(s: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9ঀ-৿]", "", s).lower()
+
+    target_key = _key(bare_name)
+    if not target_key:
+        return bare_name
+
+    ext = os.path.splitext(bare_name)[1]
+    if not ext:
+        return bare_name
+
+    # Build a regex from bare_name: keep only letters/digits, replace
+    # everything else with .+? (match any chars, non-greedy).
+    # E.g. "Name_(February 17 2026).jpg" →
+    #   "Name.+?February.+?17.+?2026.+?jpg"
+    parts: list[str] = []
+    for ch in bare_name:
+        if ch.isalnum() or 'ঀ' <= ch <= '৿':
+            # Bengali or ASCII alphanumeric — keep as literal
+            parts.append(re.escape(ch))
+        else:
+            # Punctuation, space, etc. — allow anything here
+            parts.append(r".+?")
+    pattern = "".join(parts)
+
+    candidates: list[str] = []
+    for m in re.finditer(pattern, text, re.IGNORECASE):
+        full = m.group(0)
+        if _key(full) == target_key:
+            candidates.append(full)
+
+    return max(candidates, key=len) if candidates else bare_name
 
 
 def extract_urls_media(text: str, source: str = "wikipedia") -> List[Dict[str, Any]]:
@@ -125,6 +175,9 @@ def extract_urls_media(text: str, source: str = "wikipedia") -> List[Dict[str, A
         page_url_match = _URL_RE.search(nearby)
         if page_url_match and "wikipedia" in page_url_match.group(0).lower():
             page_url = page_url_match.group(0)
+            # Fuzzy-lookup: find the real filename in the original text
+            # (backend may strip commas from wiki file refs in rendered text).
+            filename = _fuzzy_lookup_filename(filename, text)
             # Encode filename: spaces → _, keep Bengali chars unencoded
             safe_name = filename.replace(" ", "_")
 

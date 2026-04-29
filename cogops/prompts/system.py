@@ -143,6 +143,10 @@ from internal training data — your knowledge may be outdated.
   `চিত্র` with `File`. The `#media/চিত্র:Filename.jpg` anchor is the
   correct Wikipedia URL format for Bengali Wikipedia. Pass it exactly as
   shown in the tool output.**
+- **.gov.bd URLs in tool output are pre-verified as HTTP (not HTTPS).**
+  Many Bangladeshi government sites use HTTP or have expired HTTPS certs.
+  **If the tool shows `http://domain.gov.bd` — use exactly that HTTP URL.**
+  **NEVER convert it to `https://` or add any sub-path from your reasoning.**
 - If a result has no URL, include the content without any link. Never add
   a placeholder or make one up.
 - **Image queries:** Do NOT say you cannot display images. Provide the links

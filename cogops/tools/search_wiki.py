@@ -4,7 +4,7 @@ import httpx
 from typing import Tuple, List, Union
 
 from cogops.utils.url_media_extractor import extract_urls_media
-from cogops.utils.site_checker import check_urls
+from cogops.utils.site_checker import check_urls, replace_webpage_urls_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,10 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
         if combined:
             context.append(f"Context:\n{combined}")
 
-        # Collect result URLs for Media Links extraction and sources
+        # Collect result URLs for sources
         sources = []
-        result_urls = []
+        # Map section titles (after ###) to page URLs
+        title_to_url: dict[str, str] = {}
         if results:
             for i, r in enumerate(results, 1):
                 title = r.get("title", "Untitled")
@@ -68,30 +69,74 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
                     f"{i}. [{title}]({url})" + (f" (updated: {pub})" if pub else "")
                 )
                 if url:
-                    result_urls.append(url)
+                    title_to_url[title] = url
 
-        # Extract URLs and check status, append as "Media Links" to context
-        # Include result URLs in text so wiki file refs can be resolved
-        all_text = "\n".join(context + result_urls)
-        try:
-            extracted = extract_urls_media(all_text, source="wikipedia")
-            if extracted:
-                media_items = await check_urls(extracted)
-                media_lines = ["\n## Media Links"]
-                for m in media_items:
-                    status = m.get("status", "?")
-                    u = m.get("url", "")
-                    # Skip items that aren't real URLs
-                    if not u.startswith("http://") and not u.startswith("https://"):
+        # Split combined_context by ### headers and inject Media Links per section.
+        if combined and title_to_url:
+            try:
+                import re as _re
+                sections = _re.split(r'(?=\n### )', combined.strip())
+                all_page_urls = list(title_to_url.values())
+
+                new_context_parts: list[str] = []
+                seen_images: set[str] = set()
+
+                for section in sections:
+                    section = section.strip()
+                    if not section:
                         continue
-                    typ = m.get("type", "?")
-                    extra = ""
-                    if "redirect_to" in m:
-                        extra = f" (redirects to {m['redirect_to']})"
-                    media_lines.append(f"- [{typ}] {u} — **{status}**{extra}")
-                context.append("\n".join(media_lines))
-        except Exception as e:
-            logger.debug("URL extraction failed: %s", e)
+
+                    # Extract page URL for this section by matching ### title
+                    section_title_match = _re.match(r'###\s*(.+)', section)
+                    section_title = section_title_match.group(1).strip() if section_title_match else ""
+                    # Try exact match first, then partial match
+                    page_url = title_to_url.get(section_title)
+                    if not page_url:
+                        # Try stripping common disambiguation suffixes
+                        cleaned = _re.sub(r'\s*\(বাংলাদেশ\)\s*$', '', section_title)
+                        page_url = title_to_url.get(cleaned)
+                    if not page_url:
+                        # Try substring: does any result title appear in the section text?
+                        for rtitle, rurl in title_to_url.items():
+                            if rtitle in section:
+                                page_url = rurl
+                                break
+
+                    # Extract wiki file refs from this section only
+                    section_extracted: list[dict] = []
+                    if page_url:
+                        entry_text = section + "\n" + page_url
+                        section_extracted = extract_urls_media(entry_text, source="wikipedia")
+
+                    # Check status for this section's extracted items
+                    if section_extracted:
+                        media_items = await check_urls(section_extracted)
+                        # Replace webpage URLs in section with verified versions
+                        section = replace_webpage_urls_in_text(section, section_extracted, media_items)
+                        for m in media_items:
+                            status = m.get("status", "?")
+                            u = m.get("url", "")
+                            if not u.startswith("http://") and not u.startswith("https://"):
+                                continue
+                            key = u.lower()
+                            if key in seen_images:
+                                continue
+                            seen_images.add(key)
+                            typ = m.get("type", "?")
+                            extra = ""
+                            if "redirect_to" in m:
+                                extra = f" (redirects to {m['redirect_to']})"
+                            media_line = f"- [{typ}] {u} — **{status}**{extra}"
+                            section += "\n\n## Media Links\n" + media_line
+
+                    new_context_parts.append(section)
+
+                # Rebuild context with per-section Media Links
+                context = [f"Query: {formal_query}"]
+                if new_context_parts:
+                    context.append("Context:\n" + "\n".join(new_context_parts))
+            except Exception as e:
+                logger.debug("URL extraction failed: %s", e)
 
         return context, sources
 

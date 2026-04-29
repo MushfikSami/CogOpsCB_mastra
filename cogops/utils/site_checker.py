@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from cogops.utils.url_media_extractor import _URL_RE
+
 logger = logging.getLogger(__name__)
 
 # Timeout per URL check (seconds)
@@ -59,6 +61,44 @@ def _is_wikimedia(url: str) -> bool:
 def _to_http(url: str) -> str:
     """Convert https://...gov.bd... to http://...gov.bd..."""
     return url.replace("https://", "http://", 1)
+
+
+def replace_webpage_urls_in_text(
+    text: str,
+    original_items: List[Dict[str, Any]],
+    checked_items: List[Dict[str, Any]],
+) -> str:
+    """
+    For webpage-type media items, if the checked URL differs from the
+    original URL in *text*, replace the text version with the verified URL.
+
+    The checker may normalise https → http (e.g. for .gov.bd sites).
+    Pass the same objects before and after check_urls.
+    Status info is already in the Media Links section — only replace the URL.
+    """
+    if not original_items or not checked_items:
+        return text
+
+    url_map: dict[str, str] = {}
+    for orig, chk in zip(original_items, checked_items):
+        orig_url = orig.get("url", "")
+        chk_url = chk.get("url", "")
+        if not orig_url.startswith("http") or not chk_url.startswith("http"):
+            continue
+        if orig.get("type") != "webpage":
+            continue
+        if orig_url.lower() == chk_url.lower():
+            continue
+        url_map[orig_url.lower()] = chk_url
+
+    if not url_map:
+        return text
+
+    def _replace(m):
+        low = m.group(0).lower()
+        return url_map.get(low, m.group(0))
+
+    return _URL_RE.sub(_replace, text)
 
 
 async def check_urls(
