@@ -2,18 +2,21 @@ import streamlit as st
 import requests
 import json
 import uuid
+import os
 
 # --- Configuration ---
-API_BASE_URL = "http://localhost:9000"
+API_BASE_URL = os.getenv("GOVOPS_API_URL", "http://localhost:9000")
 CHAT_ENDPOINT = f"{API_BASE_URL}/chat/stream"
 CLEAR_ENDPOINT = f"{API_BASE_URL}/session/clear"
+HEALTH_ENDPOINT = f"{API_BASE_URL}/health"
 
-# Hardcoded debug secret — matches ADMIN_DEBUG_SECRET in .env
-DEBUG_SECRET = "SuperDebugCoTCB"
+# Debug secret — matches ADMIN_DEBUG_SECRET in .env
+DEBUG_SECRET = os.getenv("GOVOPS_DEBUG_SECRET", "SuperDebugCoTCB")
+REQUEST_TIMEOUT = int(os.getenv("GOVOPS_REQUEST_TIMEOUT", "300"))
 
 # --- Page Setup ---
 st.set_page_config(
-    page_title="RAMDOM UI - Government Services Chatbot",
+    page_title="Government Services Chatbot",
     page_icon="🇧🇩",
     layout="wide"
 )
@@ -40,6 +43,13 @@ st.markdown("""
         white-space: pre-wrap;
         font-size: 0.85rem;
     }
+    .status-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,35 +65,55 @@ if "messages" not in st.session_state:
         }
     ]
 
-# --- Helper Functions ---
+if "server_online" not in st.session_state:
+    st.session_state.server_online = True
+
 
 def clear_session():
     """Calls API to clear memory and resets UI state."""
     try:
-        requests.post(CLEAR_ENDPOINT, json={"user_id": st.session_state.user_id})
+        requests.post(CLEAR_ENDPOINT, json={"user_id": st.session_state.user_id}, timeout=10)
     except Exception:
         pass
     st.session_state.messages = []
     st.rerun()
 
-# --- UI Rendering ---
 
-# 1. Sidebar (Controls)
+def check_health() -> bool:
+    """Check if the API server is running."""
+    try:
+        resp = requests.get(HEALTH_ENDPOINT, timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+# --- Check server health ---
+st.session_state.server_online = check_health()
+
+# --- Sidebar ---
 with st.sidebar:
     st.title("কন্ট্রোল প্যানেল")
     st.markdown(f"**User ID:** `{st.session_state.user_id}`")
-    st.markdown("---")
-    st.subheader("Live Debug View")
-    st.caption("Reasoning, tool calls & results are always visible.")
+
+    # Server status indicator
+    status = "🟢 Online" if st.session_state.server_online else "🔴 Offline"
+    st.markdown(f"**Server:** {status}")
+
     st.markdown("---")
     if st.button("নতুন করে শুরু করুন (Clear)", type="primary"):
         clear_session()
 
-# 2. Main Header
-st.title("DUMMY UI - Government Services Chatbot")
+# --- Main Header ---
+st.title("Government Services Chatbot")
 st.caption("আপনার ব্যক্তিগত সরকারী সেবা সহকারী | Powered by GovOps AI")
 
-# 3. Chat History Render Loop
+# --- Server Offline Banner ---
+if not st.session_state.server_online:
+    st.warning("⚠️ Government Services API server is not responding. Please check if the govtchat.service is running.")
+    st.stop()
+
+# --- Chat History ---
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg["role"] == "user":
@@ -97,7 +127,7 @@ for msg in st.session_state.messages:
                     st.markdown(msg["tool_content"])
             st.markdown(msg["content"])
 
-# 4. Input & Streaming Logic
+# --- Input & Streaming ---
 if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (যেমন: পাসপোর্ট ফি কত?)..."):
 
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -105,9 +135,9 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        cot_expander = st.expander("Reasoning", expanded=True)
+        cot_expander = st.expander("Reasoning", expanded=False)
         cot_placeholder = cot_expander.empty()
-        tool_expander = st.expander("Tool Logs", expanded=True)
+        tool_expander = st.expander("Tool Logs", expanded=False)
         tool_placeholder = tool_expander.empty()
 
         answer_placeholder = st.empty()
@@ -116,10 +146,9 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
         full_response = ""
 
         payload = {"user_id": st.session_state.user_id, "query": prompt}
-        headers = {"X-Debug-Key": DEBUG_SECRET}
 
         try:
-            with requests.post(CHAT_ENDPOINT, json=payload, headers=headers, stream=True) as r:
+            with requests.post(CHAT_ENDPOINT, json=payload, stream=True, timeout=REQUEST_TIMEOUT) as r:
                 r.raise_for_status()
 
                 for line in r.iter_lines():
@@ -128,7 +157,6 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                             event = json.loads(line.decode('utf-8'))
                             evt_type = event.get("type")
 
-                            # --- New event types ---
                             if evt_type == "reasoning_chunk":
                                 if cot_placeholder:
                                     chunk = event.get("content", "")
@@ -158,11 +186,9 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
                                         full_tool_log += f"Preview:\n```\n{preview}\n```\n\n"
                                     tool_placeholder.markdown(full_tool_log)
 
-                            # --- Ignored debug-only structural events (silently skipped) ---
                             elif evt_type in ("turn_start", "turn_end", "usage"):
                                 pass
 
-                            # --- Existing event types ---
                             elif evt_type == "answer_chunk":
                                 full_response += event.get("content", "")
                                 answer_placeholder.markdown(full_response + "▌")
@@ -184,5 +210,9 @@ if prompt := st.chat_input("আপনার প্রশ্ন লিখুন (
             }
             st.session_state.messages.append(msg_entry)
 
+        except requests.exceptions.Timeout:
+            st.error("⏱️ সার্ভার প্রতিক্রিয়া দিতে সময় নিয়েছে। আবার চেষ্টা করুন।")
+        except requests.exceptions.ConnectionError:
+            st.error("❌ সার্ভারের সাথে সংযোগ স্থাপন করা যাচ্ছে না।")
         except Exception as e:
             st.error(f"সার্ভারের সাথে সংযোগ স্থাপন করা যাচ্ছে না। (Error: {e})")

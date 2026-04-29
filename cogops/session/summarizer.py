@@ -45,15 +45,18 @@ async def summarize_and_update(
     current_summary = store.get_summary(user_id) or "(empty)"
 
     try:
-        response = await secondary_client.chat.completions.create(
-            model=secondary_model,
-            messages=[{"role": "user", "content": SUMMARIZER_PROMPT.format(
-                current_summary=current_summary,
-                user_turn=user_turn,
-                assistant_turn=assistant_turn,
-            )}],
-            max_tokens=max_tokens,
-            temperature=0.3,
+        response = await asyncio.wait_for(
+            secondary_client.chat.completions.create(
+                model=secondary_model,
+                messages=[{"role": "user", "content": SUMMARIZER_PROMPT.format(
+                    current_summary=current_summary,
+                    user_turn=user_turn,
+                    assistant_turn=assistant_turn,
+                )}],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            ),
+            timeout=30.0,
         )
         new_summary = response.choices[0].message.content or ""
         store.set_summary(user_id, new_summary)

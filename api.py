@@ -14,8 +14,10 @@ from cogops.agents.orchestrator import Orchestrator
 
 from cogops.events.channels import filter_for_user, filter_for_debug
 from cogops.session.query_log import QueryLog
+from cogops.session.session_logger import SessionLogger
 
 _query_log = QueryLog()
+_session_logger = SessionLogger()
 
 load_dotenv()
 
@@ -110,39 +112,82 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = Header(
     server_debug_secret = os.getenv("ADMIN_DEBUG_SECRET")
     debug_mode = (server_debug_secret is not None) and (x_debug_key == server_debug_secret)
 
+    session_id = _session_logger.start_session(request.user_id, request.query)
+
     async def event_generator():
         # Length guard inside the generator so this function stays a plain
         # async def (not an async generator), allowing `return StreamingResponse`.
         if len(request.query) > max_chars:
-            yield json.dumps({"type": "error", "content": large_error, "channel": "user"}) + "\n"
-            yield json.dumps({"type": "answer_complete", "channel": "both"}) + "\n"
+            error_evt = {"type": "error", "content": large_error, "channel": "user"}
+            _session_logger.ingest_event(error_evt)
+            complete_evt = {"type": "answer_complete", "channel": "both"}
+            _session_logger.ingest_event(complete_evt)
+            _session_logger.finalize_session(request.user_id)
+            yield json.dumps(error_evt) + "\n"
+            yield json.dumps(complete_evt) + "\n"
             return
 
         try:
             async for event in agent.process_query(request.query, user_id=request.user_id):
+                # Ingest ALL events (regardless of channel) for the audit log
+                _session_logger.ingest_event(event)
                 # Filter events based on debug mode
                 if debug_mode:
-                    # Include debug + both events (exclude user-only)
                     filtered = filter_for_debug([event])
                 else:
-                    # Include user + both events (exclude debug-only)
                     filtered = filter_for_user([event])
 
                 for evt in filtered:
                     json_str = json.dumps(evt, ensure_ascii=True)
                     yield f"{json_str}\n"
-                    await asyncio.sleep(0.001)
 
         except Exception as e:
             logger.error(f"Stream error for user {request.user_id}: {e}")
-            err_msg = json.dumps({
+            error_evt = {
                 "type": "error",
                 "content": "Server-side streaming error.",
                 "channel": "user"
-            })
+            }
+            _session_logger.ingest_event(error_evt)
+            _session_logger.finalize_session(request.user_id)
+            err_msg = json.dumps(error_evt)
             yield f"{err_msg}\n"
+            return
+
+        # Finalize the session trace after all events are consumed
+        _session_logger.finalize_session(request.user_id)
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+@app.get("/session/audit", tags=["System"])
+async def audit_endpoint(limit: int = 20):
+    """Return the latest session traces with tool calls, reasoning, and answers."""
+    traces = _session_logger.get_traces(limit=limit)
+    # Strip raw event arrays for the API response to keep it reasonable
+    summary = []
+    for t in traces:
+        summary.append({
+            "user_id": t.get("user_id"),
+            "query": t.get("query"),
+            "session_id": t.get("session_id"),
+            "start_time": t.get("start_time"),
+            "end_time": t.get("end_time"),
+            "event_count": t.get("event_count"),
+            "tool_call_count": t.get("tool_call_count"),
+            "tool_results": t.get("tool_results", []),
+            "reasoning_chunks": t.get("reasoning_chunks", []),
+            "total_answer": t.get("total_answer", ""),
+            "total_reasoning": t.get("total_reasoning", ""),
+        })
+    return summary
+
+
+@app.get("/session/audit/raw", tags=["System"])
+async def audit_raw_endpoint(limit: int = 20):
+    """Return full session traces including raw event arrays."""
+    traces = _session_logger.get_traces(limit=limit)
+    return traces
+
 
 @app.post("/session/clear", tags=["Session"])
 async def clear_session(request: SessionRequest):

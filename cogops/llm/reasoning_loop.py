@@ -273,19 +273,18 @@ async def stream_with_tool_calls(
                 "debug",
             )
 
-            # --- Execute the tools ---
+            # --- Execute the tools in parallel ---
             logger.info(f"Executing {len(tool_calls_list)} tool(s)...")
 
-            for tool_call in tool_calls_list:
+            async def execute_tool(tool_call: Dict[str, Any]) -> Dict[str, Any]:
                 function_name = tool_call["function"]["name"]
-                last_function_name = function_name
                 call_id = tool_call["id"]
-
-                function_to_call = available_tools.get(function_name)
-                tool_result_content = ""
-                sources_for_debug: List[str] = []
                 start_time = time.time()
 
+                tool_result_content = ""
+                sources_for_debug: List[str] = []
+
+                function_to_call = available_tools.get(function_name)
                 if function_to_call:
                     try:
                         raw_args = tool_call["function"]["arguments"] or "{}"
@@ -315,24 +314,36 @@ async def stream_with_tool_calls(
                     )
 
                 elapsed_ms = round((time.time() - start_time) * 1000)
+                return {
+                    "name": function_name,
+                    "call_id": call_id,
+                    "content": tool_result_content,
+                    "sources": sources_for_debug,
+                    "elapsed_ms": elapsed_ms,
+                }
+
+            results = await asyncio.gather(*[execute_tool(tc) for tc in tool_calls_list])
+
+            for result in results:
+                last_function_name = result["name"]
                 yield _make_event(
                     "tool_result",
                     {
-                        "call_id": call_id,
-                        "name": function_name,
-                        "sources": sources_for_debug,
-                        "preview": tool_result_content[:200],
-                        "duration_ms": elapsed_ms,
-                        "status": "error" if tool_result_content.startswith("Error") else "ok",
+                        "call_id": result["call_id"],
+                        "name": result["name"],
+                        "sources": result["sources"],
+                        "preview": result["content"][:200],
+                        "duration_ms": result["elapsed_ms"],
+                        "status": "error" if result["content"].startswith("Error") else "ok",
                     },
                     "debug",
                 )
 
                 messages.append({
-                    "tool_call_id": call_id,
+                    "tool_call_id": result["call_id"],
                     "role": "tool",
-                    "name": function_name,
-                    "content": tool_result_content,
+                    "name": result["name"],
+                    "content": result["content"],
                 })
 
         except BadRequestError as e:
@@ -348,7 +359,8 @@ async def stream_with_tool_calls(
                 )
                 raise ContextLengthExceededError() from e
             logger.error(f"API Bad Request: {e}")
-            raise
+            # Re-raise so orchestrator handles it (yields error + fallback)
+            raise RuntimeError(f"API Bad Request: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error in LLM loop: {e}", exc_info=True)
             yield _make_event(

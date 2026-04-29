@@ -179,6 +179,16 @@ class Orchestrator:
             extra_body: Dict[str, Any] = {
                 'max_tokens': self.llm_call_config.get('max_tokens', 2048),
             }
+            # Pass generation parameters from config if available.
+            llm_call_cfg = self.llm_call_config
+            if llm_call_cfg:
+                # Qwen36 native thinking uses temperature for thinking depth
+                extra_body['temperature'] = llm_call_cfg.get('thinking_general', {}).get('temperature', 1.0)
+                extra_body['top_p'] = llm_call_cfg.get('thinking_general', {}).get('top_p', 0.95)
+                extra_body['top_k'] = llm_call_cfg.get('thinking_general', {}).get('top_k', 20)
+                extra_body['min_p'] = llm_call_cfg.get('thinking_general', {}).get('min_p', 0.0)
+                extra_body['presence_penalty'] = llm_call_cfg.get('thinking_general', {}).get('presence_penalty', 1.5)
+                extra_body['repetition_penalty'] = llm_call_cfg.get('thinking_general', {}).get('repetition_penalty', 1.0)
 
             # --- Bind tools with per-request context --------------------
             ctx = self._build_tool_context(user_id)
