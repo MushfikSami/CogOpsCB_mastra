@@ -104,6 +104,26 @@ class RedisSessionStore:
         key = self._key(user_id, "summary")
         self._client.delete(key)
 
+    # --- Last Assistant Meta ---
+    def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
+        if not self.available:
+            return
+        key = self._key(user_id, "last_assistant_meta")
+        self._client.set(key, json.dumps(meta))
+        self._client.expire(key, self.ttl)
+
+    def get_last_assistant_meta(self, user_id: str) -> Optional[dict]:
+        if not self.available:
+            return None
+        key = self._key(user_id, "last_assistant_meta")
+        raw = self._client.get(key)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
     # --- Cleanup ---
     def clear_all(self, user_id: str) -> None:
         if not self.available:

@@ -14,7 +14,6 @@ import os
 import json
 import asyncio
 import logging
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
@@ -26,6 +25,7 @@ from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
 from cogops.prompts.system import get_system_prompt
 from cogops.session.redis_store import RedisSessionStore
+from cogops.session.summarizer import run_summarizer_task
 from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
 from cogops.utils.tokenizer import Tokenizer
 from cogops.utils.truncate import truncate_messages_to_budget
@@ -35,20 +35,6 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-def _is_short_followup(text: str, max_chars: int = 16) -> bool:
-    s = text.strip()
-    if not s:
-        return False
-    if len(s) <= max_chars:
-        return True
-    # Also catch patterns like "number 3", "option 2", "the second one".
-    low = s.lower()
-    if any(kw in low for kw in ("second one", "third one", "first one", "last one",
-                                "tell me more", "more details", "that one")):
-        return True
-    return bool(re.fullmatch(r"\d+[.)\s]*", s))
 
 
 class Orchestrator:
@@ -81,11 +67,9 @@ class Orchestrator:
                 agent_story=self.agent_story,
                 tools_description=self.tools_desc_str,
                 max_concurrent_query=self.max_concurrent_query,
-                thinking=thinking,
             )
         self.system_prompt = Orchestrator._cached_system_prompt
 
-        self.feedback_history: List[Dict[str, Any]] = []
         self.history: List[Tuple[str, str]] = []
 
         # Shared tokenizer: used for active context truncation
@@ -111,24 +95,32 @@ class Orchestrator:
 
     def _load_llm_call_config(self):
         self.llm_call_config = self.config.get('llm_call_parameters', {})
-        self.response_templates = self.config.get('response_templates', {})
         reasoning_cfg = self.config.get('reasoning', {})
         self.max_turns = reasoning_cfg.get('max_turns', 10)
-        self.short_followup_max_chars = reasoning_cfg.get('short_followup_max_chars', 16)
         self.max_concurrent_query = reasoning_cfg.get('max_concurrent_query', 2)
         self.max_input_chars = reasoning_cfg.get('max_input_chars', 1000)
         self.large_input_error = reasoning_cfg.get('large_input_error', "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।")
+        self.summarizer_max_tokens = int(os.getenv(
+            self.config.get('summarizer', {}).get('max_tokens_env', 'SUMMARIZER_MAX_TOKENS'),
+            str(self.config.get('summarizer', {}).get('max_tokens_default', 300)),
+        ))
 
     def _initialize_llm(self) -> AsyncLLMService:
         config_llm = _load_endpoint_config(self.config, 'llm')
+        config_secondary = _load_endpoint_config(self.config, 'secondary')
         return AsyncLLMService(
             config_llm=config_llm,
+            config_secondary=config_secondary,
         )
 
     def _build_tool_context(self, user_id: Optional[str]) -> ToolContext:
         return ToolContext(
             user_id=user_id,
             store=self.redis_store,
+            secondary_client=(self.llm_service.client_secondary
+                              if hasattr(self.llm_service, 'client_secondary') else None),
+            secondary_model=(self.llm_service.llm_config.model
+                             if (self.llm_service.llm_config and hasattr(self.llm_service, 'llm_config')) else ""),
             tool_map=self.raw_tool_map,
             tools_schema=self.tools_schema,
         )
@@ -155,22 +147,6 @@ class Orchestrator:
         try:
             current_turn_id = str(uuid.uuid4())[:8]
 
-            # --- Short follow-up resolution ------------------------------
-            if user_id and self.redis_store.available and _is_short_followup(original_user_query, self.short_followup_max_chars):
-                last = self.redis_store.get_last_assistant_meta(user_id)
-                if last and last.get('assistant_text'):
-                    opts = _format_options(last.get('options') or [])
-                    user_query = (
-                        f"Previous assistant reply (for context):\n"
-                        f"{last['assistant_text']}\n"
-                        + (f"\nEnumerated options:\n{opts}\n" if opts else "")
-                        + f"\nUser follow-up: {original_user_query}\n\n"
-                          f"If this follow-up refers to an item in the previous "
-                          f"reply, resolve it first (call history_query "
-                          f"mode='recent' n=2 if you need more context), then "
-                          f"call the appropriate information tool."
-                    )
-
             # --- Build messages -----------------------------------------
             _now_bdt = datetime.now(timezone(timedelta(hours=6)))
             _date_line = (
@@ -184,8 +160,8 @@ class Orchestrator:
             )
 
             messages = [
-                {"role": "system", "content": self.system_prompt + _date_line + rolling_summary_delta},
-                {"role": "user", "content": user_query},
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": _date_line + rolling_summary_delta + "\n\n" + user_query},
             ]
 
             # Active token-budget truncation (before the first primary-LLM call).
@@ -200,20 +176,10 @@ class Orchestrator:
 
             full_answer_accumulator: List[str] = []
 
-            # --- Build extra_body + thinking toggle ---------------------
-            thinking_mode = self.llm_call_config.get('thinking_general', {})
-            extra_body: Dict[str, Any] = dict(thinking_mode)
-            extra_body['max_tokens'] = self.llm_call_config.get('max_tokens', 2048)
-
-            if self.config.get('llm', {}).get('thinking', False):
-                ctk = dict(extra_body.get('chat_template_kwargs', {}))
-                ctk['enable_thinking'] = True
-                extra_body['chat_template_kwargs'] = ctk
-
-            loop_kwargs: Dict[str, Any] = {}
-            for k in ('presence_penalty', 'repetition_penalty', 'top_p', 'top_k'):
-                if k in thinking_mode:
-                    loop_kwargs[k] = thinking_mode[k]
+            # --- Build extra_body ---------------------
+            extra_body: Dict[str, Any] = {
+                'max_tokens': self.llm_call_config.get('max_tokens', 2048),
+            }
 
             # --- Bind tools with per-request context --------------------
             ctx = self._build_tool_context(user_id)
@@ -230,12 +196,14 @@ class Orchestrator:
                     available_tools=bound_tool_map,
                     max_turns=self.max_turns,
                     extra_body=extra_body,
-                    **loop_kwargs,
                 )
 
                 async for event in stream_gen:
-                    yield event
+                    # Yield debug events (tool calls, results, reasoning, etc.)
+                    if event.get("type") not in ("answer_chunk",):
+                        yield event
 
+                    # Accumulate answer chunks for final response
                     if event["type"] == "answer_chunk":
                         full_answer_accumulator.append(event.get("content", ""))
 
@@ -256,13 +224,22 @@ class Orchestrator:
                     self.redis_store.store_turn(user_id, turn)
                     self.history.append((original_user_query, final_response))
 
-                    # Persist the last assistant reply + any options it offered
-                    # so the next short follow-up can be resolved.
                     self.redis_store.set_last_assistant_meta(user_id, {
                         "assistant_text": final_response,
-                        "options": _extract_enumerated_options(final_response),
                         "turn_id": current_turn_id,
                     })
+
+                    # Rolling summary in background via secondary LLM
+                    asyncio.create_task(run_summarizer_task(
+                        secondary_client=self.llm_service.client_secondary,
+                        secondary_model=(self.llm_service.llm_config.model
+                                         if self.llm_service.llm_config else ""),
+                        user_id=user_id,
+                        store=self.redis_store,
+                        user_turn=original_user_query,
+                        assistant_turn=final_response,
+                        max_tokens=self.summarizer_max_tokens,
+                    ))
 
             except Exception as e:
                 logger.error(f"Error in reasoning loop: {e}", exc_info=True)
@@ -276,62 +253,11 @@ class Orchestrator:
             logger.error(f"Critical Error in Orchestrator: {e}", exc_info=True)
             yield {
                 "type": "error",
-                "content": self.response_templates.get(
-                    'error_fallback', "Error occurred."),
+                "content": "একটি প্রযুক্তিগত ত্রুটির কারণে সাহায্য করতে পারছি না। অনুগ্রহ করে আবার চেষ্টা করুন।",
                 "channel": "user",
             }
 
     def clear_session(self):
         self.history = []
-        self.feedback_history = []
         logger.info("Session cleared.")
 
-    def add_feedback(self, user_id: str, turn_id: str, rating: str,
-                     comment: str = "") -> None:
-        entry = {
-            "turn_id": turn_id,
-            "rating": rating,
-            "comment": comment,
-            "timestamp": str(uuid.uuid4())[:8],
-        }
-        self.feedback_history.append(entry)
-        if len(self.feedback_history) > 5:
-            self.feedback_history.pop(0)
-
-    def get_negative_feedback(self) -> str:
-        negatives = [f for f in self.feedback_history
-                     if f["rating"] in ("bad", "unhelpful", "wrong")]
-        if not negatives:
-            return ""
-        lines = ["Recent negative feedback:"]
-        for f in negatives:
-            lines.append(
-                f"Turn {f['turn_id']}: rating={f['rating']}, "
-                f"comment='{f.get('comment', '')}'"
-            )
-        return "\n".join(lines)
-
-
-_ENUMERATED_LINE_RE = re.compile(
-    r"^\s*(?:\d+[.)]|[-*•])\s+(.+)$"
-)
-
-
-def _format_options(options: List[str]) -> str:
-    if not options:
-        return ""
-    return "\n".join(f"- {o}" for o in options)
-
-
-def _extract_enumerated_options(text: str) -> List[str]:
-    """Pull bullet/numbered items out of an assistant reply so short follow-ups
-    like '3' can resolve to the third item. Works for both numbered (1., 2))
-    and bullet (-, *, •) enumerations."""
-    if not text:
-        return []
-    out: List[str] = []
-    for line in text.splitlines():
-        m = _ENUMERATED_LINE_RE.match(line)
-        if m:
-            out.append(m.group(1).strip())
-    return out

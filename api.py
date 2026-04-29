@@ -56,12 +56,6 @@ class ChatRequest(BaseModel):
 class SessionRequest(BaseModel):
     user_id: str
 
-class FeedbackRequest(BaseModel):
-    user_id: str
-    turn_id: str
-    rating: str  # "good", "bad", "unhelpful", "wrong"
-    comment: Optional[str] = ""
-
 # --- Helper Functions ---
 
 async def get_agent_session(user_id: str) -> Orchestrator:
@@ -147,22 +141,6 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = Header(
             yield f"{err_msg}\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
-
-@app.post("/feedback", tags=["Feedback"])
-async def submit_feedback(request: FeedbackRequest):
-    """Store user feedback for a specific turn. Negative feedback surfaces to system context."""
-    async with session_lock:
-        agent = active_sessions.get(request.user_id)
-        if agent:
-            agent.add_feedback(
-                user_id=request.user_id,
-                turn_id=request.turn_id,
-                rating=request.rating,
-                comment=request.comment or "",
-            )
-            return {"status": "success", "message": "Feedback recorded."}
-        else:
-            return {"status": "ignored", "message": "No active session found."}
 
 @app.post("/session/clear", tags=["Session"])
 async def clear_session(request: SessionRequest):

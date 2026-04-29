@@ -1,21 +1,39 @@
-# GovOps Agent (আশা) — ReAct Tool Usage Guide
-
-## Complete Decision Matrix: When to Call Each Tool
-
-This document describes every tool in the **আশা** (Asha) Bangladesh Government Service Agent, the conditions under which it should be called, and the complete decision flow.
-
----
+# GovOps Agent (আশা) — Tool Usage Guide
 
 ## Architecture Overview
 
 The agent is a **ReAct (Thought-Action-Observation)** agent powered by Qwen3 with native thinking. The reasoning loop runs for up to 10 turns (configurable):
 
-1. On **Turn 1**, forces `tool_choice="required"` — the model MUST call some tool
-2. On **Turn 2+**, uses `tool_choice="auto"` — the model may stop calling tools
-3. Executes called tools and feeds results back
-4. The model goes through **THOUGHT → ACTION → OBSERVATION** cycles
+1. Every turn uses `tool_choice="auto"` — the model freely decides when to call tools
+2. Executes called tools and feeds results back
+3. The model goes through **THOUGHT → ACTION → OBSERVATION** cycles
 
 The system prompt contains the complete decision logic. Below is the structured extraction.
+
+---
+
+## System-Prompt Protocols (Not Tools)
+
+`answer_directly` and `ask_user` are **NOT tools** anymore. They are system-prompt protocols where the model simply writes text — no function call.
+
+### Direct Reply Protocol
+
+When the model's intent matches these categories, it writes the answer directly as text:
+
+| Situation | Behavior |
+|---|---|
+| Greeting, small talk | Friendly greeting in Bengali |
+| "Who are you?" / capabilities (about yourself) | Identity reply in Bengali |
+| Political/religious/controversial | Acknowledge AI role, decline, offer services |
+| Abusive/insulting input | Ask politely for civil language |
+| Illegal/dangerous request | Refuse clearly |
+| Both searches returned nothing | Polite Bengali reply: no info available |
+
+The model writes the text — the reasoning loop delivers it naturally.
+
+### Ask User Protocol
+
+When the model's intent is genuinely ambiguous and needs clarification, it writes a question directly as text (optionally with numbered options). No function call.
 
 ---
 
@@ -26,16 +44,14 @@ The system prompt contains the complete decision logic. Below is the structured 
 | `search_knowledge` | Search — Government Services (Jiggasha) | No |
 | `search_wiki` | Search — General Knowledge (Wikipedia) | No |
 | `history_query` | Conversation History | Yes |
-| `ask_user` | Interaction — Clarification | No |
-| `answer_directly` | Interaction — Direct Response | No |
+
+**3 tools total.** No `answer_directly`, no `ask_user`.
 
 ---
 
 ## Tool Breakdown
 
-### Search Tools
-
-#### `search_knowledge(formal_query, keyword_string)`
+### `search_knowledge(formal_query, keyword_string)`
 
 **When to call:**
 - Any Bangladesh government service inquiry (procedures, fees, document requirements, offices, boards, departments, regulations)
@@ -50,12 +66,9 @@ The system prompt contains the complete decision logic. Below is the structured 
 
 **Fallback rule:** If this returns no results, call `search_wiki` next with the **same** parameters.
 
-**Key prompt text:**
-> "ALWAYS call search_knowledge first for Bangladesh government service queries."
-
 ---
 
-#### `search_wiki(formal_query, keyword_string)`
+### `search_wiki(formal_query, keyword_string)`
 
 **When to call:**
 - General knowledge about Bangladesh, world events, history, public figures
@@ -69,66 +82,9 @@ The system prompt contains the complete decision logic. Below is the structured 
 **What the agent sees:** `combined_context` — Wikipedia article excerpts
 **Debug logs show:** article titles, URLs, published_at timestamps
 
-**Key prompt text:**
-> "If search_knowledge returns no results, call search_wiki with the same formal_query and keyword_string."
-
 ---
 
-### Interaction Tools
-
-#### `answer_directly(category, text)`
-
-**Purpose:** Meta-tool satisfying the "must call a tool" constraint for non-factual replies. The reasoning loop detects a sentinel string (`__ANSWER_DIRECTLY__::`) and streams the reply directly, then ends.
-
-**Categories:**
-
-| Category | When to Use |
-|---|---|
-| `chitchat` | Greetings, small talk, pleasantries |
-| `identity` | Questions about YOUR OWN identity ("who are you?") — NOT third parties |
-| `safety_deflect` | Political, religious, controversial opinions |
-| `abuse` | Abusive/insulting user messages |
-| `illegal` | Weapons, violence, tax evasion, hacking |
-| `no_info_found` | Both search_knowledge and search_wiki returned nothing |
-
-**When to call:**
-- Non-factual queries (greetings, identity, safety)
-- Gibberish/nonsense input (model decides this)
-- Both search tools returned no results
-
-**When NOT to call:**
-- **Never as a first tool on a factual query** — search first, answer later
-
-**Mechanics:**
-- Returns sentinel `__ANSWER_DIRECTLY__::category::text`
-- Reasoning loop detects sentinel and streams text to user (12 chars, 15ms apart)
-- Immediately ends — no further turns
-
----
-
-#### `ask_user(question, options?, reason?)`
-
-**When to call:**
-- Query is genuinely ambiguous between multiple services
-- You recognize a category exists but the user hasn't specified which one
-
-**Examples:**
-| Ambiguous Input | Multiple Options |
-|---|---|
-| "লাইসেন্স নবায়ন করতে চাই" | trade, vehicle, professional license |
-| "সার্টিফিকেট লাগবে" | birth, death, income, residence |
-| "কর দিতে চাই" | income tax, land tax, VAT |
-| "পাসপোর্ট" | new, renewal, emergency, cancellation |
-
-**How to use:** Provide 2-4 concrete options in Bangla.
-
-**When NOT to call:** Before attempting a search — only use after search narrows to candidates.
-
----
-
-### History Tool
-
-#### `history_query(mode, query?, n?)`
+### `history_query(mode, query?, n?)`
 
 **When to call:**
 - Query is ambiguous and could refer to something discussed previously
@@ -146,14 +102,6 @@ The system prompt contains the complete decision logic. Below is the structured 
 
 **Requires:** `user_id`, Redis store available.
 
-**Key prompt text:**
-> "Use when the query is ambiguous and could refer to something discussed previously — call history_query(mode='recent', n=3) first to check if the user is referencing a prior turn, then decide."
-
-**Orchestrator-level follow-up resolution:**
-- Before the model sees the query, the orchestrator checks if it's a short follow-up
-- If so, it injects the previous assistant reply as context
-- The model can then use `history_query` if it needs more context
-
 ---
 
 ## Complete Decision Flow
@@ -169,20 +117,15 @@ API receives query
         │ No
         ▼
 ┌─────────────────────────┐
-│ 2. Short follow-up?     │ ── Yes ──→ Orchestrator injects
-│     (≤16 chars)          │    previous reply as context
-└─────────────────────────┘
-        │
-        ▼
-┌─────────────────────────┐
-│ 3. ReAct THOUGHT:       │
+│ 2. ReAct THOUGHT:       │
 │    Model classifies:    │
 │                         │
-│    Non-factual?         │
-│    → answer_directly    │
-│                         │
-│    Gibberish?           │
-│    → answer_directly    │
+│    Matches Direct Reply │
+│    (greeting/identity/  │
+│    safety/abuse/illegal/│
+│    no_info)?            │
+│    → YES → write text   │
+│    → NO → continue      │
 │                         │
 │    Ambiguous ref?       │
 │    → history_query      │
@@ -194,11 +137,14 @@ API receives query
 │                         │
 │    General knowledge?   │
 │    → search_wiki        │
+│                         │
+│    Ambiguous?           │
+│    → ask_user (text)    │
 └─────────────────────────┘
         │
         ▼
 ┌─────────────────────────┐
-│ 4. ReAct OBSERVATION:   │
+│ 3. ReAct OBSERVATION:   │
 │    Results sufficient?  │
 │    → Yes → final answer │
 │    → No  → THOUGHT again│
@@ -206,9 +152,10 @@ API receives query
         │
         ▼
 ┌─────────────────────────┐
-│ 5. Final answer         │
+│ 4. Final answer         │
 │    → Redis persistence  │
 │    → answer_complete    │
+│    → background summary │
 └─────────────────────────┘
 ```
 
@@ -216,26 +163,19 @@ API receives query
 
 ## ReAct Paradigm
 
-### Turn 1 (tool_choice="required")
+### Every Turn (tool_choice="auto")
 
-The model MUST call at least one tool. Classification:
-- Non-factual → `answer_directly(category, text)`
-- Ambiguous/follow-up → `history_query(mode='recent', n=3)`
-- Gov service → `search_knowledge(formal_query, keyword_string)`
-- General knowledge → `search_wiki(formal_query, keyword_string)`
+The model freely decides:
 
-### Turn 2+ (tool_choice="auto")
-
-The model may stop calling tools when it has enough data. If not:
-- If `search_knowledge` returned nothing → `search_wiki`
-- If both returned nothing → `answer_directly(no_info_found)`
-- If data incomplete → more tool calls (prefer parallel in single turn)
-
-### Answer Directly Short-Circuit
-
-1. Model calls `answer_directly(category, text)`
-2. Reasoning loop detects sentinel → streams text to user
-3. Immediately ends — no further turns
+| Situation | Action |
+|---|---|
+| Matches Direct Reply Protocol | Write text directly (no tool call) |
+| Ambiguous — needs clarification | Ask user directly (no tool call) |
+| Ambiguous — needs history | `history_query(mode='recent', n=3)` |
+| Government service inquiry | `search_knowledge(formal_query, keyword_string)` |
+| `search_knowledge` returned nothing | `search_wiki(formal_query, keyword_string)` |
+| Both returned nothing | Direct Reply Protocol (write "no info" text) |
+| General knowledge | `search_wiki(formal_query, keyword_string)` |
 
 ---
 
@@ -263,7 +203,7 @@ When the `X-Debug-Key` header matches the server secret:
 ### Redis Storage
 - **Turns**: Redis list (LPUSH, most recent first), max 20 turns fetched
 - **Rolling summary**: Redis string key
-- **Last assistant meta**: Last reply + enumerated options for follow-up resolution
+- **Last assistant meta**: Last reply + turn_id
 - **TTL**: 86400 seconds (24 hours) default
 
 ### Message Truncation
@@ -278,10 +218,10 @@ When the `X-Debug-Key` header matches the server secret:
 
 1. **Never answer from parametric knowledge on factual queries** — always call a tool first
 2. **Parallel calls preferred** — call multiple tools in a single turn, not sequentially
-3. **Never call `answer_directly` first on a factual query** — search first, answer later
+3. **Direct Reply and Ask User are protocols, not tools** — the model writes text, no function call
 4. **Formal Bengali** for all user-facing text; search queries may use Bengali or English
 5. **Never expose tool names, arguments, or internal reasoning** to the user
 6. **Never reference information sources** ("according to the database") — state answers naturally
 7. **Maximum 2 concurrent different questions** per response (configurable)
 8. **Time awareness** — Bangladesh office hours: Sunday-Thursday 9am-5pm, Friday-Saturday closed
-9. **Search chain**: Jiggasha first for gov services → Wikipedia fallback if empty → answer_directly(no_info_found) if both empty
+9. **Search chain**: Jiggasha first for gov services → Wikipedia fallback if empty → write "no info" reply if both empty

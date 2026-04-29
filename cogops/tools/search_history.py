@@ -56,6 +56,13 @@ def history_query_lookup(turns: list[dict], query: str) -> str:
 
 
 
+def history_query_summarize(rolling_summary: str) -> str:
+    """Return the rolling summary verbatim."""
+    if not rolling_summary:
+        return "No conversation summary available yet."
+    return f"Recent conversation summary:\n{rolling_summary}"
+
+
 def history_query_recent(turns: list[dict], n: int = 3) -> str:
     """Return the last N turns verbatim."""
     recent = turns[:n]
@@ -114,7 +121,7 @@ async def history_query(
     Main entry point for the history_query tool.
 
     Args:
-        mode: 'lookup' | 'recent' | 'ask'
+        mode: 'lookup' | 'recent' | 'ask' | 'summarize'
         query: search term (for 'lookup' and 'ask' modes)
         n: number of recent turns to return (for 'recent' mode)
         user_id: session user_id (required for all modes)
@@ -122,8 +129,8 @@ async def history_query(
         secondary_client: AsyncOpenAI for the secondary LLM (required for 'ask' mode)
         secondary_model: model name for secondary LLM
     """
-    if mode not in ("lookup",  "recent", "ask"):
-        return f"Invalid mode '{mode}'. Use: lookup,recent, ask."
+    if mode not in ("lookup", "recent", "ask", "summarize"):
+        return f"Invalid mode '{mode}'. Use: lookup, recent, ask, summarize."
 
     if not user_id:
         return "Missing user_id."
@@ -132,6 +139,10 @@ async def history_query(
         return "History store not available."
 
     turns = store.get_recent_turns(user_id, n=_default_max_turns())
+
+    if mode == "summarize":
+        summary = store.get_summary(user_id)
+        return history_query_summarize(summary)
 
     if mode == "lookup":
         return history_query_lookup(turns, query or "")
