@@ -289,9 +289,29 @@ async def stream_with_tool_calls(
                 is_last_turn = True
                 break
 
+            # Build a per-tool-call summary with parsed arguments for consumers
+            tool_call_summaries = []
+            for tc in tool_calls_list:
+                raw_args = tc.get("function", {}).get("arguments", "")
+                parsed_args = {}
+                if raw_args:
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_args = {"_raw": raw_args}
+                tool_call_summaries.append({
+                    "call_id": tc.get("id", ""),
+                    "name": tc.get("function", {}).get("name", ""),
+                    "arguments": parsed_args,
+                })
+
             yield _make_event(
                 "tool_call",
-                {"tool_calls": tool_calls_list, "turn": turn_count},
+                {
+                    "tool_calls": tool_calls_list,
+                    "tool_call_summaries": tool_call_summaries,
+                    "turn": turn_count,
+                },
                 "debug",
             )
 
@@ -354,7 +374,7 @@ async def stream_with_tool_calls(
                         "call_id": result["call_id"],
                         "name": result["name"],
                         "sources": result["sources"],
-                        "preview": result["content"][:200],
+                        "preview": result["content"],
                         "duration_ms": result["elapsed_ms"],
                         "status": "error" if result["content"].startswith("Error") else "ok",
                     },

@@ -83,11 +83,32 @@ class SessionLogger:
         buf["events"].append(event)
 
         if etype == "tool_call":
-            buf["tool_calls"].append({
-                "tool_name": event.get("tool_calls", [{}])[0].get("function", {}).get("name", "?"),
-                "arguments": event.get("tool_calls", [{}])[0].get("function", {}).get("arguments", ""),
-                "turn": event.get("turn", "?"),
-            })
+            # Use the new tool_call_summaries if available, otherwise fall back to raw structure
+            summaries = event.get("tool_call_summaries", [])
+            if summaries:
+                for s in summaries:
+                    buf["tool_calls"].append({
+                        "call_id": s.get("call_id", ""),
+                        "tool_name": s.get("name", "?"),
+                        "arguments": s.get("arguments", {}),
+                        "turn": event.get("turn", "?"),
+                    })
+            else:
+                # Legacy: raw tool_calls structure
+                for tc in event.get("tool_calls", []):
+                    raw_args = tc.get("function", {}).get("arguments", "")
+                    parsed = {}
+                    if raw_args:
+                        try:
+                            parsed = json.loads(raw_args)
+                        except (json.JSONDecodeError, TypeError):
+                            parsed = {"_raw": raw_args}
+                    buf["tool_calls"].append({
+                        "call_id": tc.get("id", ""),
+                        "tool_name": tc.get("function", {}).get("name", "?"),
+                        "arguments": parsed,
+                        "turn": event.get("turn", "?"),
+                    })
         elif etype == "tool_result":
             buf["tool_results"].append({
                 "name": event.get("name", "?"),
