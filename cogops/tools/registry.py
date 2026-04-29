@@ -13,7 +13,7 @@ Tools fall into two groups:
 
 import inspect
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -55,14 +55,13 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
     all_map: Dict[str, Callable] = {}
 
     # --- Knowledge search tool ---
-    from cogops.tools.knowledge.search_knowledge import (
+    from cogops.tools.search_knowledge import (
         search_knowledge_tools_list as k1,
         search_knowledge_tools_map as k2,
     )
     all_schema.extend(k1)
     all_map.update(k2)
 
-    
     # --- Wiki search tool ---
     from cogops.tools.search_wiki import (
         search_wiki_tools_list as w1,
@@ -71,20 +70,11 @@ def build_tool_registry() -> Tuple[List[Dict[str, Any]], Dict[str, Callable]]:
     all_schema.extend(w1)
     all_map.update(w2)
 
-    # --- Interaction tools ---
-    from cogops.tools.ask_user import ask_user_tools_list as i1, ask_user_tools_map as i2
-    all_schema.extend(i1)
-    all_map.update(i2)
-
-    from cogops.tools.answer_directly import (
-        answer_directly_tools_list as a1,
-        answer_directly_tools_map as a2,
-    )
-    all_schema.extend(a1)
-    all_map.update(a2)
-
     # --- History tool (needs user_id + store + secondary for 'ask' mode) ---
-    from cogops.tools.history.query import history_query_tools_list as h1, history_query_tools_map as h2
+    from cogops.tools.search_history import (
+        history_query_tools_list as h1,
+        history_query_tools_map as h2
+    )
     all_schema.extend(h1)
     all_map.update(h2)
 
