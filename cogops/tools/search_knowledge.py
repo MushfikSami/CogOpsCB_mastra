@@ -3,6 +3,9 @@ import logging
 import httpx
 from typing import Tuple, List, Union
 
+from cogops.utils.url_media_extractor import extract_urls_media
+from cogops.utils.site_checker import check_urls
+
 from cogops.config.loader import load_config
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,25 @@ async def search_knowledge(formal_query: str, keyword_string: str) -> Tuple[Unio
         sources = []
         if results:
             sources =[r.get("node", "") for r in results]
+
+        # Extract URLs and check status, append as "Media Links" to context
+        all_text = "\n".join(context)
+        try:
+            extracted = extract_urls_media(all_text, source="jiggasha")
+            if extracted:
+                media_items = await check_urls(extracted)
+                media_lines = ["\n## Media Links"]
+                for m in media_items:
+                    status = m.get("status", "?")
+                    u = m.get("url", "")
+                    typ = m.get("type", "?")
+                    extra = ""
+                    if "redirect_to" in m:
+                        extra = f" (redirects to {m['redirect_to']})"
+                    media_lines.append(f"- [{typ}] {u} — **{status}**{extra}")
+                context.append("\n".join(media_lines))
+        except Exception as e:
+            logger.debug("URL extraction failed: %s", e)
 
         return context, sources
 

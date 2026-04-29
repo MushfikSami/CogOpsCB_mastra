@@ -3,6 +3,9 @@ import logging
 import httpx
 from typing import Tuple, List, Union
 
+from cogops.utils.url_media_extractor import extract_urls_media
+from cogops.utils.site_checker import check_urls
+
 logger = logging.getLogger(__name__)
 
 WIKI_ENDPOINT = os.getenv(
@@ -63,7 +66,26 @@ async def search_wiki(formal_query: str, keyword_string: str) -> Tuple[Union[str
                 sources.append(
                     f"{i}. [{title}]({url})" + (f" (updated: {pub})" if pub else "")
                 )
-        
+
+        # Extract URLs and check status, append as "Media Links" to context
+        all_text = "\n".join(context)
+        try:
+            extracted = extract_urls_media(all_text, source="wikipedia")
+            if extracted:
+                media_items = await check_urls(extracted)
+                media_lines = ["\n## Media Links"]
+                for m in media_items:
+                    status = m.get("status", "?")
+                    u = m.get("url", "")
+                    typ = m.get("type", "?")
+                    extra = ""
+                    if "redirect_to" in m:
+                        extra = f" (redirects to {m['redirect_to']})"
+                    media_lines.append(f"- [{typ}] {u} — **{status}**{extra}")
+                context.append("\n".join(media_lines))
+        except Exception as e:
+            logger.debug("URL extraction failed: %s", e)
+
         return context, sources
 
     except Exception as e:
