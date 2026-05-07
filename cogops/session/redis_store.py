@@ -1,120 +1,159 @@
 """
 cogops/session/redis_store.py
 
-Redis wrapper for session: raw turns, rolling summary.
+Redis-backed session store for turns and rolling summaries.
+Falls back to in-memory store when Redis is unavailable.
 """
 
 import json
 import logging
 import os
-from typing import Optional, Any, List
-from dotenv import load_dotenv
+from typing import Optional, List
 
-load_dotenv()
+load_dotenv_imported = False
+try:
+    from dotenv import load_dotenv
+    load_dotenv_imported = True
+    load_dotenv()
+except ImportError:
+    pass
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-try:
-    import redis
-    _REDIS_AVAILABLE = True
-except ImportError:
-    _REDIS_AVAILABLE = False
+
+class InMemoryStore:
+    """Simple in-memory fallback when Redis is unavailable."""
+
+    def __init__(self):
+        self._turns: dict[str, List[dict]] = {}
+        self._summaries: dict[str, str] = {}
+        self._meta: dict[str, dict] = {}
+
+    def store_turn(self, user_id: str, turn: dict) -> None:
+        self._turns.setdefault(user_id, []).insert(0, turn)
+
+    def get_recent_turns(self, user_id: str, n: int = 5) -> List[dict]:
+        return self._turns.get(user_id, [])[:n]
+
+    def clear_turns(self, user_id: str) -> None:
+        self._turns.pop(user_id, None)
+
+    def set_summary(self, user_id: str, summary: str) -> None:
+        self._summaries[user_id] = summary
+
+    def get_summary(self, user_id: str) -> str:
+        return self._summaries.get(user_id, "")
+
+    def clear_summary(self, user_id: str) -> None:
+        self._summaries.pop(user_id, None)
+
+    def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
+        self._meta[user_id] = meta
+
+    def get_last_assistant_meta(self, user_id: str) -> Optional[dict]:
+        return self._meta.get(user_id)
+
+    def clear_all(self, user_id: str) -> None:
+        self._turns.pop(user_id, None)
+        self._summaries.pop(user_id, None)
+        self._meta.pop(user_id, None)
 
 
 class RedisSessionStore:
-    """Redis-backed session store for turns and rolling summaries."""
+    """Redis-backed session store with in-memory fallback."""
 
     def __init__(self, url: Optional[str] = None, ttl_seconds: Optional[int] = None):
-        if not _REDIS_AVAILABLE:
-            logger.warning("redis package not installed — RedisSessionStore is disabled.")
-            self._client = None
+        try:
+            import redis as _redis
+        except ImportError:
+            logger.warning("redis package not installed — using in-memory fallback.")
+            self._client = InMemoryStore()
+            self._redis_available = False
             return
 
-        cfg = {"session": {}}
+        self._redis_available = False
+        self.ttl = ttl_seconds if ttl_seconds is not None else 86400
+
+        session_cfg = {}
         try:
             from cogops.config.loader import load_config
-            cfg = load_config()
+            session_cfg = load_config().get("session", {})
         except Exception:
             pass
-        session_cfg = cfg.get("session", {})
 
         default_url = session_cfg.get("redis_url_default", "redis://localhost:6379/0")
-        default_ttl = session_cfg.get("ttl_default", 86400)
-
         url = url or os.getenv(session_cfg.get("redis_url_env", "REDIS_URL"), default_url)
-        self.ttl = ttl_seconds if ttl_seconds is not None else int(
-            os.getenv(session_cfg.get("ttl_seconds_env", "REDIS_SESSION_TTL_SECONDS"), str(default_ttl))
-        )
+
         try:
-            self._client = redis.from_url(url, decode_responses=True)
+            self._client = _redis.from_url(url, decode_responses=True)
             self._client.ping()
-            logger.info(f"Redis connected: {url}")
+            self._redis_available = True
+            logger.info("Redis connected: %s", url)
         except Exception as e:
-            logger.warning(f"Redis connection failed ({e}) — falling back to in-memory store.")
-            self._client = None
+            logger.warning("Redis connection failed (%s) — using in-memory fallback.", e)
+            self._client = InMemoryStore()
 
     @property
     def available(self) -> bool:
-        return self._client is not None
+        return self._redis_available
 
     def _key(self, user_id: str, suffix: str) -> str:
         return f"session:{user_id}:{suffix}"
 
-    # --- Turns ---
     def store_turn(self, user_id: str, turn: dict) -> None:
-        """Append a turn (dict) to the turns list."""
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.store_turn(user_id, turn)
             return
         key = self._key(user_id, "turns")
         self._client.lpush(key, json.dumps(turn))
         self._client.expire(key, self.ttl)
 
     def get_recent_turns(self, user_id: str, n: int = 5) -> List[dict]:
-        """Get the last N turns (most recent first in list)."""
-        if not self.available:
-            return []
+        if isinstance(self._client, InMemoryStore):
+            return self._client.get_recent_turns(user_id, n)
         key = self._key(user_id, "turns")
         raw = self._client.lrange(key, 0, n - 1)
         return [json.loads(r) for r in raw]
 
     def clear_turns(self, user_id: str) -> None:
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.clear_turns(user_id)
             return
         key = self._key(user_id, "turns")
         self._client.delete(key)
 
-    # --- Rolling Summary ---
     def set_summary(self, user_id: str, summary: str) -> None:
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.set_summary(user_id, summary)
             return
         key = self._key(user_id, "summary")
         self._client.set(key, summary)
         self._client.expire(key, self.ttl)
 
     def get_summary(self, user_id: str) -> str:
-        if not self.available:
-            return ""
+        if isinstance(self._client, InMemoryStore):
+            return self._client.get_summary(user_id)
         key = self._key(user_id, "summary")
         return self._client.get(key) or ""
 
     def clear_summary(self, user_id: str) -> None:
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.clear_summary(user_id)
             return
         key = self._key(user_id, "summary")
         self._client.delete(key)
 
-    # --- Last Assistant Meta ---
     def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.set_last_assistant_meta(user_id, meta)
             return
         key = self._key(user_id, "last_assistant_meta")
         self._client.set(key, json.dumps(meta))
         self._client.expire(key, self.ttl)
 
     def get_last_assistant_meta(self, user_id: str) -> Optional[dict]:
-        if not self.available:
-            return None
+        if isinstance(self._client, InMemoryStore):
+            return self._client.get_last_assistant_meta(user_id)
         key = self._key(user_id, "last_assistant_meta")
         raw = self._client.get(key)
         if raw is None:
@@ -124,9 +163,9 @@ class RedisSessionStore:
         except (json.JSONDecodeError, TypeError):
             return None
 
-    # --- Cleanup ---
     def clear_all(self, user_id: str) -> None:
-        if not self.available:
+        if isinstance(self._client, InMemoryStore):
+            self._client.clear_all(user_id)
             return
         pattern = self._key(user_id, "*")
         keys = self._client.keys(pattern)

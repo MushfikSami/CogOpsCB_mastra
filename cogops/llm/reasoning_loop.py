@@ -1,54 +1,27 @@
 """
 cogops/llm/reasoning_loop.py
 
-The ReAct tool-calling while loop. Every yielded event is tagged with a channel
-("user", "debug", or "both"); the API layer filters events by channel based
-on whether the caller is authenticated for debug.
-
-Behaviour guarantees:
-- Final-answer text is streamed chunk-by-chunk on channel "both" as it arrives,
-  with `<thinking>...</thinking>` segments stripped.
-- Reasoning is emitted on channel "debug" as `reasoning_chunk` events. The
-  loop picks up reasoning from either `delta.reasoning_content` (vLLM/Qwen
-  field) or inline `<thinking>` tags inside `delta.content` — whichever the
-  provider emits.
-- `tool_result` debug events carry the `sources` list and a short `preview`
-  of the retrieved context, never the full retrieved blob (which can be
-  large). The model still sees the full content via the `messages` array.
-- When `max_turns` is exhausted without a final answer, the user sees a
-  graceful Bengali "server load" message. The actual loop-exhaustion is
-  logged at CRITICAL level for ops.
+The ReAct tool-calling while loop. Two-phase approach:
+- Phase 1: Non-streaming call with tool_choice="required" to force tool calls
+- Phase 2: Streaming call for final answer (when no tool calls)
+- Tool results appended as messages between turns
 """
 
 import json
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from openai import AsyncOpenAI, BadRequestError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
 
-RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError, RuntimeError)
-
+RETRYABLE = (ConnectionError, TimeoutError, RuntimeError)
 _DEFAULT_MAX_TURNS = 10
 
 logger = logging.getLogger(__name__)
-
-
-def log_retry_attempt(retry_state):
-    logger.warning(
-        f"LLM API call failed with {retry_state.outcome.exception()}, "
-        f"retrying in {retry_state.next_action.sleep} seconds... "
-        f"(Attempt {retry_state.attempt_number})"
-    )
-
-
-class ContextLengthExceededError(Exception):
-    """Raised when the conversation history exceeds the model's limit."""
-    pass
 
 
 def _make_event(event_type: str, data: dict, channel: str) -> Dict[str, Any]:
@@ -57,22 +30,111 @@ def _make_event(event_type: str, data: dict, channel: str) -> Dict[str, Any]:
     return evt
 
 
+def _post_tool_refine(
+    tool_content: str,
+    secondary_client,
+    secondary_model: str,
+    threshold_tokens: int = 800,
+) -> str:
+    """Condense large tool results via secondary LLM."""
+    if not secondary_client or not secondary_model:
+        return tool_content
+
+    est_tokens = len(tool_content) / 4
+    if est_tokens <= threshold_tokens:
+        return tool_content
+
+    try:
+        response = asyncio.get_event_loop().run_until_complete(
+            asyncio.wait_for(
+                secondary_client.chat.completions.create(
+                    model=secondary_model,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            f"Extract only the relevant parts from this tool result. "
+                            f"Return condensed text only.\n\nTool Result:\n{tool_content}"
+                        ),
+                    }],
+                    max_tokens=512,
+                    temperature=0.3,
+                ),
+                timeout=15.0,
+            )
+        )
+        refined = response.choices[0].message.content or tool_content
+        logger.debug("Post-tool refined: %d -> %d chars", len(tool_content), len(refined))
+        return refined
+    except Exception as e:
+        logger.warning("Post-tool refine failed: %s", e)
+        return tool_content
+
+
+def _unpack_tool_response(response_data: Any) -> tuple:
+    """Normalize tool return into (content_for_model, sources_for_debug)."""
+    if response_data is None:
+        return "", []
+
+    if isinstance(response_data, tuple) and len(response_data) == 2:
+        context_part, sources_part = response_data
+        content = "\n\n".join(str(p) for p in context_part) if isinstance(context_part, list) else str(context_part)
+        sources = list(sources_part) if isinstance(sources_part, list) else []
+        return content, sources
+
+    return str(response_data), []
+
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(RETRYABLE),
+)
+async def _call_llm_nonstream(
+    client: AsyncOpenAI,
+    model: str,
+    messages: List[Dict],
+    tools_schema: List[Dict],
+    extra_body: Dict,
+) -> Any:
+    """Non-streaming call with required tool choice."""
+    return await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=tools_schema if tools_schema else None,
+        tool_choice="required" if tools_schema else None,
+        stream=False,
+        extra_body=extra_body,
+    )
+
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(RETRYABLE),
+)
+async def _call_llm_stream(
+    client: AsyncOpenAI,
+    model: str,
+    messages: List[Dict],
+    extra_body: Dict,
+) -> Any:
+    """Streaming call for final answer (no tools)."""
+    return await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        stream=True,
+        extra_body=extra_body,
+    )
+
+
 class ThinkingStripper:
-    """
-    Streaming separator for `<thinking>...</thinking>` tags.
+    """Streaming separator for <thinking>...</thinking> tags."""
 
-    Feed it text deltas via `feed()`; iterate the yielded `(channel, text)`
-    pairs where channel is `"answer"` (outside tags) or `"thinking"` (inside).
-    Tags themselves are consumed and never re-emitted.
-
-    The stripper holds back up to HOLDBACK chars at the tail of its buffer
-    so a tag spanning multiple deltas is detected correctly. Call `flush()`
-    at end of stream to drain any buffered content.
-    """
-
-    OPEN_TAG = "<thinking>"
-    CLOSE_TAG = "</thinking>"
-    HOLDBACK = len(CLOSE_TAG)  # widest tag we might be in the middle of receiving
+    OPEN = "<thinking>"
+    CLOSE = "</thinking>"
+    HOLDBACK = len(CLOSE)
 
     def __init__(self):
         self.buffer = ""
@@ -87,7 +149,7 @@ class ThinkingStripper:
         self.buffer += text
 
         while True:
-            target = self.CLOSE_TAG if self.in_thinking else self.OPEN_TAG
+            target = self.CLOSE if self.in_thinking else self.OPEN
             idx = self.buffer.find(target)
 
             if idx >= 0:
@@ -98,8 +160,6 @@ class ThinkingStripper:
                 self.in_thinking = not self.in_thinking
                 continue
 
-            # No complete tag found. Emit the prefix that cannot possibly be
-            # part of a tag, hold back the tail.
             if len(self.buffer) > self.HOLDBACK:
                 safe = self.buffer[:-self.HOLDBACK]
                 yield (self._channel(), safe)
@@ -107,52 +167,18 @@ class ThinkingStripper:
             return
 
     def flush(self):
-        """Drain any buffered content at end of stream."""
         if not self.buffer:
             return
         if self.in_thinking:
-            logger.warning(
-                "Stream ended with unclosed <thinking> tag; flushing %d "
-                "buffered chars to debug channel.",
-                len(self.buffer),
-            )
+            logger.warning("Stream ended with unclosed <thinking> tag; flushing %d chars.", len(self.buffer))
         yield (self._channel(), self.buffer)
         self.buffer = ""
-
-
-def _unpack_tool_response(
-    response_data: Any,
-) -> Tuple[str, List[str]]:
-    """
-    Normalize a tool's return value into (content_for_model, sources_for_debug).
-
-    Tools may return:
-      - A `(context, sources)` tuple where context is either a list of
-        formatted strings (success path) or an error string. This is the
-        contract used by `search_knowledge` and `search_wiki`.
-      - A plain string (e.g. `history_query`).
-      - None (treated as empty content).
-    """
-    if response_data is None:
-        return "", []
-
-    if isinstance(response_data, tuple) and len(response_data) == 2:
-        context_part, sources_part = response_data
-        if isinstance(context_part, list):
-            content = "\n\n".join(str(p) for p in context_part)
-        else:
-            content = str(context_part)
-        sources = list(sources_part) if isinstance(sources_part, list) else []
-        return content, sources
-
-    return str(response_data), []
 
 
 @retry(
     wait=wait_exponential(multiplier=1, min=1, max=10),
     stop=stop_after_attempt(3),
-    retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
-    before_sleep=log_retry_attempt,
+    retry=retry_if_exception_type(RETRYABLE),
 )
 async def stream_with_tool_calls(
     client_llm: AsyncOpenAI,
@@ -162,224 +188,173 @@ async def stream_with_tool_calls(
     available_tools: Dict[str, Callable],
     max_turns: int = _DEFAULT_MAX_TURNS,
     extra_body: Optional[Dict[str, Any]] = None,
+    client_secondary=None,
+    secondary_model: str = "",
+    threshold_tokens: int = 800,
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Orchestrates the ReAct conversation using the primary LLM endpoint.
+    Orchestrates the ReAct conversation.
 
-    Stream-friendly: answer text is yielded as `answer_chunk` events on
-    channel "both" as it arrives. Reasoning is yielded as `reasoning_chunk`
-    on channel "debug". Tool calls and tool results are also "debug".
+    Strategy: Use non-streaming calls with tool_choice="required" for tool-calling turns.
+    This avoids the Qwen36 bug where streaming mode produces inline text instead of tool calls.
+    When the model produces no tool calls (final answer), stream the response.
     """
     extra_body = dict(extra_body or {})
-
     turn_count = 0
-    is_last_turn = False
+    answer_accumulator = ""
     last_function_name: Optional[str] = None
 
     while turn_count < max_turns:
         turn_count += 1
-        logger.info(f"Turn {turn_count}/{max_turns} started.")
-
-        is_last_turn = False
 
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
-            stream = await client_llm.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools_schema if tools_schema else None,
-                tool_choice="auto" if tools_schema else None,
-                stream=True,
-                extra_body=extra_body,
-                **kwargs,
-            )
+            # --- Non-streaming call with required tool choice ---
+            try:
+                response = await _call_llm_nonstream(
+                    client_llm, model, messages, tools_schema, extra_body,
+                )
+            except Exception:
+                yield _make_event("answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both")
+                raise
 
-            answer_accumulator = ""
-            stripper = ThinkingStripper()
-            tool_call_index_map: Dict[int, Dict[str, Any]] = {}
-            in_reasoning = False  # Track native-thinking mode (Path A)
+            msg = response.choices[0].message
+            tool_calls = msg.tool_calls
+            content = msg.content or ""
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-
-                # Path A: provider exposes reasoning as a separate field.
-                reasoning_delta = getattr(delta, "reasoning_content", None)
-                if reasoning_delta:
-                    in_reasoning = True
-                    yield _make_event(
-                        "reasoning_chunk", {"content": reasoning_delta}, "debug"
-                    )
-                    # DO NOT add reasoning_content to answer_accumulator — it
-                    # must never leak into the user-facing answer.
-                    continue
-
-                # If we are currently in native-thinking mode, hold back any
-                # delta.content until the thinking ends.
-                if in_reasoning:
-                    # The model switches from thinking to answer when
-                    # reasoning_content stops arriving. We detect the end
-                    # of thinking when content arrives but reasoning_content
-                    # is empty (or we hit a tool call / stop).
-                    # Qwen36 signals end-of-thinking with a special token or
-                    # by simply stopping reasoning_content. For safety, we
-                    # treat all content as answer once reasoning_content
-                    # stops for a chunk that has content.
-                    if delta.content:
-                        in_reasoning = False
-                        # Fall through to Path B to process this content.
-                    else:
-                        continue
-
-                # Path B: reasoning is inline in content via <thinking> tags.
-                if delta.content:
-                    for channel, piece in stripper.feed(delta.content):
+            # --- No tool calls = final answer ---
+            if not tool_calls:
+                # Stream the answer text
+                # For non-streaming, just yield it directly
+                if content:
+                    # Handle <thinking> tags in the content
+                    stripper = ThinkingStripper()
+                    for channel, piece in stripper.feed(content):
                         if channel == "answer":
                             answer_accumulator += piece
-                            yield _make_event(
-                                "answer_chunk", {"content": piece}, "both"
-                            )
+                            yield _make_event("answer_chunk", {"content": piece}, "both")
                         else:
-                            yield _make_event(
-                                "reasoning_chunk", {"content": piece}, "debug"
-                            )
-
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        index = tc_delta.index
-                        if index not in tool_call_index_map:
-                            tool_call_index_map[index] = {
-                                "id": "",
-                                "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        if tc_delta.id:
-                            tool_call_index_map[index]["id"] += tc_delta.id
-                        if tc_delta.function and tc_delta.function.name:
-                            tool_call_index_map[index]["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function and tc_delta.function.arguments:
-                            tool_call_index_map[index]["function"]["arguments"] += tc_delta.function.arguments
-
-            # Drain any tail content the stripper held back.
-            for channel, piece in stripper.flush():
-                if channel == "answer":
-                    answer_accumulator += piece
-                    yield _make_event("answer_chunk", {"content": piece}, "both")
-                else:
-                    yield _make_event("reasoning_chunk", {"content": piece}, "debug")
-
-            # Build the assistant message to feed back in. The content stored
-            # in history is the answer-only portion (thinking is stripped).
-            response_message: Dict[str, Any] = {
-                "role": "assistant",
-                "content": answer_accumulator if answer_accumulator else None,
-            }
-
-            tool_calls_list = list(tool_call_index_map.values())
-            if tool_calls_list:
-                response_message["tool_calls"] = tool_calls_list
-
-            messages.append(response_message)
-
-            if not tool_calls_list:
-                # Model produced a final answer without a tool call.
-                is_last_turn = True
+                            yield _make_event("reasoning_chunk", {"content": piece}, "debug")
+                    for channel, piece in stripper.flush():
+                        if channel == "answer":
+                            answer_accumulator += piece
+                            yield _make_event("answer_chunk", {"content": piece}, "both")
+                messages.append({"role": "assistant", "content": content})
                 break
 
-            # Build a per-tool-call summary with parsed arguments for consumers
-            tool_call_summaries = []
-            for tc in tool_calls_list:
-                raw_args = tc.get("function", {}).get("arguments", "")
-                parsed_args = {}
-                if raw_args:
-                    try:
-                        parsed_args = json.loads(raw_args)
-                    except (json.JSONDecodeError, TypeError):
-                        parsed_args = {"_raw": raw_args}
-                tool_call_summaries.append({
-                    "call_id": tc.get("id", ""),
-                    "name": tc.get("function", {}).get("name", ""),
-                    "arguments": parsed_args,
+            # --- Tool calls detected ---
+            # Convert SDK tool_call objects to serializable dicts
+            tool_calls_dicts = []
+            for tc in tool_calls:
+                tool_calls_dicts.append({
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "",
+                    },
                 })
 
-            yield _make_event(
-                "tool_call",
-                {
-                    "tool_calls": tool_calls_list,
-                    "tool_call_summaries": tool_call_summaries,
-                    "turn": turn_count,
-                },
-                "debug",
-            )
+            # Store assistant message
+            response_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": content if content else None,
+                "tool_calls": tool_calls_dicts,
+            }
+            messages.append(response_msg)
 
-            # --- Execute the tools in parallel ---
-            logger.info(f"Executing {len(tool_calls_list)} tool(s)...")
+            # Emit reasoning/thinking content (if any)
+            if content:
+                stripper = ThinkingStripper()
+                for channel, piece in stripper.feed(content):
+                    if channel == "answer":
+                        answer_accumulator += piece
+                        yield _make_event("answer_chunk", {"content": piece}, "both")
+                    else:
+                        yield _make_event("reasoning_chunk", {"content": piece}, "debug")
 
-            async def execute_tool(tool_call: Dict[str, Any]) -> Dict[str, Any]:
-                function_name = tool_call["function"]["name"]
-                call_id = tool_call["id"]
-                start_time = time.time()
+            # Emit tool_call event
+            tool_call_summaries = []
+            for tc in tool_calls:
+                raw_args = tc.function.arguments or ""
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                except (json.JSONDecodeError, TypeError):
+                    parsed = {"_raw": raw_args}
+                tool_call_summaries.append({
+                    "call_id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": parsed,
+                })
 
-                tool_result_content = ""
-                sources_for_debug: List[str] = []
+            yield _make_event("tool_call", {
+                "tool_call_summaries": tool_call_summaries,
+                "turn": turn_count,
+            }, "debug")
 
-                function_to_call = available_tools.get(function_name)
-                if function_to_call:
+            # --- Execute tools in parallel ---
+            logger.info("Executing %d tool(s)...", len(tool_calls))
+
+            async def execute_tool(tc: Any) -> Dict[str, Any]:
+                func_name = tc.function.name
+                call_id = tc.id
+                start = time.time()
+
+                content = ""
+                sources: List[str] = []
+
+                fn = available_tools.get(func_name)
+                if fn:
                     try:
-                        raw_args = tool_call["function"]["arguments"] or "{}"
+                        raw_args = tc.function.arguments or "{}"
                         try:
-                            function_args = json.loads(raw_args)
+                            args = json.loads(raw_args)
                         except json.JSONDecodeError:
-                            tool_result_content = "Error: Invalid JSON arguments generated by model."
-                            function_args = {}
+                            content = "Error: Invalid JSON arguments from model."
+                            args = {}
 
-                        if not tool_result_content:
-                            if asyncio.iscoroutinefunction(function_to_call):
-                                response_data = await function_to_call(**function_args)
+                        if not content:
+                            if asyncio.iscoroutinefunction(fn):
+                                result = await fn(**args)
                             else:
-                                response_data = await asyncio.to_thread(
-                                    function_to_call, **function_args
-                                )
-                            tool_result_content, sources_for_debug = _unpack_tool_response(
-                                response_data
-                            )
+                                result = await asyncio.to_thread(fn, **args)
+                            content, sources = _unpack_tool_response(result)
 
                     except Exception as e:
-                        logger.error(f"Error executing {function_name}: {e}", exc_info=True)
-                        tool_result_content = f"System Error executing tool: {str(e)}"
+                        logger.error("Error executing %s: %s", func_name, e, exc_info=True)
+                        content = f"Error executing {func_name}: {e}"
                 else:
-                    tool_result_content = (
-                        f"Error: Tool '{function_name}' not defined in available_tools_map."
-                    )
+                    content = f"Tool '{func_name}' not found."
 
-                elapsed_ms = round((time.time() - start_time) * 1000)
+                elapsed = round((time.time() - start) * 1000)
+
+                # Post-tool refine
+                if content and threshold_tokens > 0:
+                    content = _post_tool_refine(content, client_secondary, secondary_model, threshold_tokens)
+
                 return {
-                    "name": function_name,
+                    "name": func_name,
                     "call_id": call_id,
-                    "content": tool_result_content,
-                    "sources": sources_for_debug,
-                    "elapsed_ms": elapsed_ms,
+                    "content": content,
+                    "sources": sources,
+                    "elapsed_ms": elapsed,
                 }
 
-            results = await asyncio.gather(*[execute_tool(tc) for tc in tool_calls_list])
+            results = await asyncio.gather(*[execute_tool(tc) for tc in tool_calls])
 
             for result in results:
                 last_function_name = result["name"]
-                yield _make_event(
-                    "tool_result",
-                    {
-                        "call_id": result["call_id"],
-                        "name": result["name"],
-                        "sources": result["sources"],
-                        "preview": result["content"],
-                        "duration_ms": result["elapsed_ms"],
-                        "status": "error" if result["content"].startswith("Error") else "ok",
-                    },
-                    "debug",
-                )
+
+                yield _make_event("tool_result", {
+                    "call_id": result["call_id"],
+                    "name": result["name"],
+                    "sources": result["sources"],
+                    "preview": result["content"][:300],
+                    "duration_ms": result["elapsed_ms"],
+                    "status": "error" if result["content"].startswith("Error") else "ok",
+                }, "debug")
 
                 messages.append({
                     "tool_call_id": result["call_id"],
@@ -390,41 +365,20 @@ async def stream_with_tool_calls(
 
         except BadRequestError as e:
             if "context length" in str(e).lower():
-                logger.critical(
-                    "Prompt exceeded model context window on turn %d. "
-                    "Last tool=%s. Returning server-load fallback to user.",
-                    turn_count,
-                    last_function_name,
-                )
-                yield _make_event(
-                    "answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both"
-                )
-                raise ContextLengthExceededError() from e
-            logger.error(f"API Bad Request: {e}")
-            # Re-raise so orchestrator handles it (yields error + fallback)
-            raise RuntimeError(f"API Bad Request: {e}") from e
+                logger.critical("Context length exceeded on turn %d. Last tool=%s.", turn_count, last_function_name)
+                yield _make_event("answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both")
+                raise
+            logger.error("Bad Request: %s", e)
+            raise RuntimeError(f"Bad Request: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error in LLM loop: {e}", exc_info=True)
-            yield _make_event(
-                "error",
-                {"content": "An internal error occurred.", "detail": str(e)},
-                "debug",
-            )
-            yield _make_event(
-                "answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both"
-            )
+            logger.error("Unexpected error in LLM loop: %s", e, exc_info=True)
+            yield _make_event("error", {"content": "Internal error.", "detail": str(e)}, "debug")
+            yield _make_event("answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both")
             raise
 
         yield _make_event("turn_end", {"turn_number": turn_count}, "debug")
 
-    if not is_last_turn:
-        logger.critical(
-            "ReAct loop exhausted max_turns=%d without a final answer. "
-            "Last tool=%s, partial answer length=%d chars.",
-            max_turns,
-            last_function_name,
-            len(answer_accumulator) if 'answer_accumulator' in locals() else 0,
-        )
-        yield _make_event(
-            "answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both"
-        )
+    # If we exhausted turns without a final answer
+    if turn_count >= max_turns:
+        logger.critical("Exhausted max_turns=%d without final answer.", max_turns)
+        yield _make_event("answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both")

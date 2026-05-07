@@ -1,13 +1,11 @@
 # ===================================================================
-# GovOps Graphiti Agent Configuration
+# CogOpsCB — Professional Production Chatbot Configuration
 # ===================================================================
 
 # --- Agent Identity ---
-# Keep agent_story factual-but-generic. Do NOT include specific URLs, service
-# names, or hard facts here — the prompt is static and cannot be updated per
-# turn, and concrete facts risk being parroted when users ask unrelated things.
-agent_name: "আশা"
-agent_story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি।"
+agent:
+  name: "আশা"
+  story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি।"
 
 # --- Primary LLM (Agent Reasoning + Native Thinking) ---
 llm:
@@ -16,73 +14,31 @@ llm:
   base_url_env: "LLM_BASE_URL"
   max_context_tokens: 32000
   thinking: false
-  
-# --- Reranker LLM (Binary Classification) ---
-reranker:
-  api_key_env: "RERANKER_API_KEY"
-  model_name_env: "RERANKER_MODEL_NAME"
-  base_url_env: "RERANKER_BASE_URL"
-  max_context_tokens: 32000
 
-# --- Secondary LLM (General Tasks, Sub-agents, post-tool refine) ---
+# --- Secondary LLM (Summarizer, History Ask, Post-Tool Refine) ---
 secondary:
   api_key_env: "SECONDARY_API_KEY"
   model_name_env: "SECONDARY_MODEL_NAME"
   base_url_env: "SECONDARY_BASE_URL"
   max_context_tokens: 32000
-  # Per-tool overrides below are consumed by the individual tool handlers.
-  grep_passage:
-    context_lines: 2
-  extract_from_document:
-    max_tokens: 2048
-  delegate_task:
-    max_tokens: 2048
-  spawn_subagent:
-    max_turns: 5
-  extract_from_document:
-    max_doc_chars: 8000
-
-# --- Embedder (Triton Inference Server) ---
-embedder:
-  url_env: "TRITON_URL"
-  url_default: "localhost:6000"
-  model_name_env: "TRITON_MODEL_NAME"
-  tokenizer_env: "TRITON_TOKENIZER"
-  max_batch_size: 8
 
 # --- Reasoning ---
 reasoning:
   max_turns: 10
-  short_followup_max_chars: 16
-  direct_stream_chars_per_chunk: 12
-  direct_stream_delay_seconds: 0.015
-  max_concurrent_query: 2
   max_input_chars: 1000
-  large_input_error: "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।"
+  max_concurrent_query: 2
 
-# --- Neo4j / Graphiti ---
-neo4j:
-  database: "qwen34neo4j"
+# --- Jiggasha Knowledge Service ---
+jiggasha:
+  endpoint_env: "JIGGASHA_ENDPOINT"
+  endpoint_default: "http://172.22.11.241:9210/search"
+  timeout: 30
 
-# --- Graphiti tools ---
-graphiti:
-  tree_explorer:
-    min_score: 0.8    # Qwen cross-encoder threshold (nodes + edges)
-    keep_top_n: 15     # Initial candidates passed to cross-encoder
-    max_edges_per_entity: 30
-  max_relations_displayed: 10
-  max_fact_display_chars: 150
-  max_prop_display_chars: 200
-  max_episode_display_chars: 500
-  max_snippet_chars: 60
-  snippet_length: 80
-  max_episodes_fetched: 200
-
-# --- History query ---
-history_query:
-  default_recent_n: 3
-  ask_turns_limit: 10
-  default_max_turns: 20
+# --- Wikipedia Search ---
+wiki:
+  endpoint_env: "WIKI_ENDPOINT"
+  endpoint_default: "http://172.22.11.241:9220/search"
+  timeout: 30
 
 # --- Session / Redis ---
 session:
@@ -99,27 +55,21 @@ summarizer:
   max_tokens_default: 300
 
 # --- Post-tool refine (secondary LLM condenses large tool results) ---
-# When a tool result exceeds threshold_tokens, the reasoning loop runs the
-# secondary LLM to extract only the parts relevant to the user's query.
-# Debug stream shows both raw and refined content.
 post_tool_refine:
   enabled: true
-  threshold_tokens: 600
+  threshold_tokens: 800
 
-# --- Knowledge search defaults ---
-knowledge_search:
-  top_k_default: 10
+# --- History query ---
+history_query:
+  default_recent_n: 3
+  ask_turns_limit: 10
+  default_max_turns: 20
 
 # --- Token & prompt management ---
-# tokenizer_model_env: env var that names a HuggingFace model whose tokenizer
-# will be used both for active context truncation AND for the refine
-# threshold check. Typically should match the primary LLM's tokenizer.
-# system_prompt_reservation: tokens reserved for system prompt + rolling
-# summary; the remainder of max_context_tokens is the truncation budget.
 token_management:
   tokenizer_model_env: "TOKENIZER_MODEL_NAME"
   tokenizer_model_default: "Qwen/Qwen2.5-32B-Instruct"
-  system_prompt_reservation: 3500
+  system_prompt_reservation: 500
 
 # --- LLM generation parameters (sent via extra_body to vLLM) ---
 llm_call_parameters:
@@ -137,15 +87,14 @@ llm_call_parameters:
     min_p: 0.0
     presence_penalty: 1.5
     repetition_penalty: 1.0
-  instruct_reasoning:
-    temperature: 1.0
-    top_p: 1.0
-    top_k: 40
-    min_p: 0.0
-    presence_penalty: 2.0
-    repetition_penalty: 1.0
   max_tokens: 2048
 
 # --- UX response templates ---
 response_templates:
   error_fallback: "একটি প্রযুক্তিগত ত্রুটির কারণে আমি এই মুহূর্তে সাহায্য করতে পারছি না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"
+  large_input_error: "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।"
+
+# --- Rate Limiting (optional, disabled by default) ---
+rate_limit:
+  enabled: false
+  max_requests_per_minute: 30
