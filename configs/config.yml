@@ -1,5 +1,5 @@
 # ===================================================================
-# CogOpsCB — Professional Production Chatbot Configuration
+# CogOpsCB — Production Chatbot Configuration
 # ===================================================================
 
 # --- Agent Identity ---
@@ -7,38 +7,17 @@ agent:
   name: "আশা"
   story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি।"
 
-# --- Primary LLM (Agent Reasoning + Native Thinking) ---
+# --- Primary LLM (Agent Reasoning) ---
 llm:
   api_key_env: "LLM_API_KEY"
   model_name_env: "LLM_MODEL_NAME"
   base_url_env: "LLM_BASE_URL"
   max_context_tokens: 32000
-  thinking: false
-
-# --- Secondary LLM (Summarizer, History Ask, Post-Tool Refine) ---
-secondary:
-  api_key_env: "SECONDARY_API_KEY"
-  model_name_env: "SECONDARY_MODEL_NAME"
-  base_url_env: "SECONDARY_BASE_URL"
-  max_context_tokens: 32000
 
 # --- Reasoning ---
 reasoning:
   max_turns: 10
-  max_input_chars: 1000
   max_concurrent_query: 2
-
-# --- Jiggasha Knowledge Service ---
-jiggasha:
-  endpoint_env: "JIGGASHA_ENDPOINT"
-  endpoint_default: "http://172.22.11.241:9210/search"
-  timeout: 30
-
-# --- Wikipedia Search ---
-wiki:
-  endpoint_env: "WIKI_ENDPOINT"
-  endpoint_default: "http://172.22.11.241:9220/search"
-  timeout: 30
 
 # --- Session / Redis ---
 session:
@@ -49,28 +28,6 @@ session:
   query_log_path: "data/query_log.jsonl"
   query_log_retention_days: 10
 
-# --- Summarizer ---
-summarizer:
-  max_tokens_env: "SUMMARIZER_MAX_TOKENS"
-  max_tokens_default: 300
-
-# --- Post-tool refine (secondary LLM condenses large tool results) ---
-post_tool_refine:
-  enabled: true
-  threshold_tokens: 800
-
-# --- History query ---
-history_query:
-  default_recent_n: 3
-  ask_turns_limit: 10
-  default_max_turns: 20
-
-# --- Token & prompt management ---
-token_management:
-  tokenizer_model_env: "TOKENIZER_MODEL_NAME"
-  tokenizer_model_default: "Qwen/Qwen2.5-32B-Instruct"
-  system_prompt_reservation: 500
-
 # --- LLM generation parameters (sent via extra_body to vLLM) ---
 llm_call_parameters:
   thinking_general:
@@ -80,21 +37,4 @@ llm_call_parameters:
     min_p: 0.0
     presence_penalty: 1.5
     repetition_penalty: 1.0
-  instruct_general:
-    temperature: 0.7
-    top_p: 0.8
-    top_k: 20
-    min_p: 0.0
-    presence_penalty: 1.5
-    repetition_penalty: 1.0
   max_tokens: 2048
-
-# --- UX response templates ---
-response_templates:
-  error_fallback: "একটি প্রযুক্তিগত ত্রুটির কারণে আমি এই মুহূর্তে সাহায্য করতে পারছি না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"
-  large_input_error: "প্রশ্নটি খুব বড়। অনুগ্রহ করে সংক্ষিপ্ত প্রশ্ন করুন।"
-
-# --- Rate Limiting (optional, disabled by default) ---
-rate_limit:
-  enabled: false
-  max_requests_per_minute: 30

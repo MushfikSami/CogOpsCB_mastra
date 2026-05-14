@@ -20,7 +20,6 @@ setup(
         'pydantic>=2.0',
         'PyYAML',
         'python-dotenv',
-        'transformers',
     ],
     classifiers=[
         "Development Status :: 4 - Beta",

@@ -66,13 +66,6 @@ class SessionLogger:
 
     def ingest_event(self, event: Dict[str, Any]) -> None:
         """Ingest a single streaming event from the generator."""
-        user_id = None
-        # Walk through all open buffers to find the one to update
-        for uid, buf in self._buffers.items():
-            # We only track the last started session per user
-            pass
-
-        # Find the most recent buffer (the one currently being processed)
         if not self._buffers:
             return
 

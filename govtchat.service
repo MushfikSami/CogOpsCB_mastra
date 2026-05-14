@@ -16,11 +16,11 @@ WorkingDirectory=/home/vpa/CogOpsCB
 
 EnvironmentFile=/home/vpa/CogOpsCB/.env
 Environment=HOME=/home/vpa
-Environment=VIRTUAL_ENV=/home/vpa/miniconda3/envs/cogops
-Environment=PATH=/home/vpa/miniconda3/envs/cogops/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=VIRTUAL_ENV=/home/vpa/miniconda3
+Environment=PATH=/home/vpa/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PYTHONPATH=/home/vpa/CogOpsCB
 
-ExecStart=/home/vpa/miniconda3/envs/cogops/bin/uvicorn api:app --host 0.0.0.0 --port 9000 --workers 2 --timeout-keep-alive 300
+ExecStart=/home/vpa/miniconda3/bin/uvicorn api:app --host 0.0.0.0 --port 9000 --workers 2 --timeout-keep-alive 300
 
 Restart=always
 RestartSec=10

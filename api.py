@@ -3,7 +3,7 @@ api.py — FastAPI server for GovOps Chatbot.
 
 Endpoints:
   POST /chat/stream  — Main streaming chat (NDJSON)
-  GET  /health       — Service health (LLM, Redis, jiggasha, wiki)
+  GET  /health       — Service health (LLM, Redis)
   POST /session/clear — Clear conversation for a user
   GET  /query-log    — Last N query entries
   GET  /session/audit — Session trace summaries
@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
@@ -88,7 +87,7 @@ async def get_agent_session(user_id: str) -> Orchestrator:
 # --- Endpoints ---
 @app.get("/health")
 async def health_check():
-    """Service health: LLM, Redis, Jiggasha, Wiki."""
+    """Service health: LLM, Redis."""
     status: Dict[str, str] = {"status": "online"}
 
     # LLM
@@ -111,24 +110,6 @@ async def health_check():
     except Exception:
         status["redis"] = "error"
 
-    # Jiggasha
-    try:
-        async with __import__("httpx").AsyncClient(timeout=5) as client:
-            endpoint = os.getenv("JIGGASHA_ENDPOINT", "http://172.22.11.241:9210/search")
-            resp = await client.post(endpoint, json={"formal_query": "ping", "keyword_string": "ping"})
-            status["jiggasha"] = "ok" if resp.status_code == 200 else "error"
-    except Exception:
-        status["jiggasha"] = "error"
-
-    # Wiki
-    try:
-        async with __import__("httpx").AsyncClient(timeout=5) as client:
-            endpoint = os.getenv("WIKI_ENDPOINT", "http://172.22.11.241:9220/search")
-            resp = await client.post(endpoint, json={"formal_query": "ping", "keyword_string": "ping"})
-            status["wiki"] = "ok" if resp.status_code == 200 else "error"
-    except Exception:
-        status["wiki"] = "error"
-
     status["active_sessions"] = len(active_sessions)
     return status
 
@@ -140,8 +121,6 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     agent = await get_agent_session(request.user_id)
-    max_chars = agent.max_input_chars
-    large_error = agent.large_input_error
 
     _query_log.append(request.query)
     server_secret = os.getenv("ADMIN_DEBUG_SECRET")
@@ -153,13 +132,6 @@ async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = None):
     logger.info("[req:%s] Chat request from %s", request_id, request.user_id)
 
     async def event_generator():
-        # Length guard
-        if len(request.query) > max_chars:
-            error_evt = {"type": "error", "content": large_error, "channel": "user"}
-            _session_logger.ingest_event(error_evt)
-            yield json.dumps(error_evt, ensure_ascii=True) + "\n"
-            return
-
         try:
             async for event in agent.process_query(request.query, user_id=request.user_id):
                 _session_logger.ingest_event(event)

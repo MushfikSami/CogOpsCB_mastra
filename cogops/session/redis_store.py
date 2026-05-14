@@ -26,8 +26,9 @@ class InMemoryStore:
 
     def __init__(self):
         self._turns: dict[str, List[dict]] = {}
-        self._summaries: dict[str, str] = {}
         self._meta: dict[str, dict] = {}
+        self._memory: dict[str, str] = {}  # key -> value for memory tools
+        self._redis_available = False
 
     def store_turn(self, user_id: str, turn: dict) -> None:
         self._turns.setdefault(user_id, []).insert(0, turn)
@@ -38,15 +39,6 @@ class InMemoryStore:
     def clear_turns(self, user_id: str) -> None:
         self._turns.pop(user_id, None)
 
-    def set_summary(self, user_id: str, summary: str) -> None:
-        self._summaries[user_id] = summary
-
-    def get_summary(self, user_id: str) -> str:
-        return self._summaries.get(user_id, "")
-
-    def clear_summary(self, user_id: str) -> None:
-        self._summaries.pop(user_id, None)
-
     def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:
         self._meta[user_id] = meta
 
@@ -55,8 +47,34 @@ class InMemoryStore:
 
     def clear_all(self, user_id: str) -> None:
         self._turns.pop(user_id, None)
-        self._summaries.pop(user_id, None)
         self._meta.pop(user_id, None)
+        # Clean up memory keys for this user
+        keys_to_remove = [k for k in self._memory if k.startswith(f"session:{user_id}:memory:")]
+        for k in keys_to_remove:
+            self._memory.pop(k, None)
+
+    @property
+    def available(self) -> bool:
+        """InMemoryStore is always 'available' for local operations."""
+        return True
+
+    # --- Redis-compatible convenience methods for memory tools ---
+    def keys(self, pattern: str) -> List[str]:
+        """Return keys matching a glob-style pattern (only * supported)."""
+        import fnmatch
+        return [k for k in self._memory if fnmatch.fnmatch(k, pattern)]
+
+    def get(self, key: str) -> Optional[str]:
+        """Get value by key, or None."""
+        return self._memory.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        """Set key-value pair."""
+        self._memory[key] = value
+
+    def expire(self, key: str, ttl: int) -> None:
+        """No-op for in-memory store (no TTL in fallback)."""
+        pass
 
 
 class RedisSessionStore:
@@ -120,27 +138,6 @@ class RedisSessionStore:
             self._client.clear_turns(user_id)
             return
         key = self._key(user_id, "turns")
-        self._client.delete(key)
-
-    def set_summary(self, user_id: str, summary: str) -> None:
-        if isinstance(self._client, InMemoryStore):
-            self._client.set_summary(user_id, summary)
-            return
-        key = self._key(user_id, "summary")
-        self._client.set(key, summary)
-        self._client.expire(key, self.ttl)
-
-    def get_summary(self, user_id: str) -> str:
-        if isinstance(self._client, InMemoryStore):
-            return self._client.get_summary(user_id)
-        key = self._key(user_id, "summary")
-        return self._client.get(key) or ""
-
-    def clear_summary(self, user_id: str) -> None:
-        if isinstance(self._client, InMemoryStore):
-            self._client.clear_summary(user_id)
-            return
-        key = self._key(user_id, "summary")
         self._client.delete(key)
 
     def set_last_assistant_meta(self, user_id: str, meta: dict) -> None:

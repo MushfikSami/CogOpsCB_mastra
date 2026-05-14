@@ -7,8 +7,8 @@ The ReAct tool-calling while loop. Two-phase approach:
 - Tool results appended as messages between turns
 """
 
-import json
 import asyncio
+import json
 import logging
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
@@ -17,6 +17,7 @@ from openai import AsyncOpenAI, BadRequestError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
+from cogops.utils.thinking_parser import ThinkingParser
 
 RETRYABLE = (ConnectionError, TimeoutError, RuntimeError)
 _DEFAULT_MAX_TURNS = 10
@@ -28,46 +29,6 @@ def _make_event(event_type: str, data: dict, channel: str) -> Dict[str, Any]:
     evt = {"type": event_type, "channel": channel}
     evt.update(data)
     return evt
-
-
-def _post_tool_refine(
-    tool_content: str,
-    secondary_client,
-    secondary_model: str,
-    threshold_tokens: int = 800,
-) -> str:
-    """Condense large tool results via secondary LLM."""
-    if not secondary_client or not secondary_model:
-        return tool_content
-
-    est_tokens = len(tool_content) / 4
-    if est_tokens <= threshold_tokens:
-        return tool_content
-
-    try:
-        response = asyncio.get_event_loop().run_until_complete(
-            asyncio.wait_for(
-                secondary_client.chat.completions.create(
-                    model=secondary_model,
-                    messages=[{
-                        "role": "user",
-                        "content": (
-                            f"Extract only the relevant parts from this tool result. "
-                            f"Return condensed text only.\n\nTool Result:\n{tool_content}"
-                        ),
-                    }],
-                    max_tokens=512,
-                    temperature=0.3,
-                ),
-                timeout=15.0,
-            )
-        )
-        refined = response.choices[0].message.content or tool_content
-        logger.debug("Post-tool refined: %d -> %d chars", len(tool_content), len(refined))
-        return refined
-    except Exception as e:
-        logger.warning("Post-tool refine failed: %s", e)
-        return tool_content
 
 
 def _unpack_tool_response(response_data: Any) -> tuple:
@@ -129,52 +90,6 @@ async def _call_llm_stream(
     )
 
 
-class ThinkingStripper:
-    """Streaming separator for <thinking>...</thinking> tags."""
-
-    OPEN = "<thinking>"
-    CLOSE = "</thinking>"
-    HOLDBACK = len(CLOSE)
-
-    def __init__(self):
-        self.buffer = ""
-        self.in_thinking = False
-
-    def _channel(self) -> str:
-        return "thinking" if self.in_thinking else "answer"
-
-    def feed(self, text: str):
-        if not text:
-            return
-        self.buffer += text
-
-        while True:
-            target = self.CLOSE if self.in_thinking else self.OPEN
-            idx = self.buffer.find(target)
-
-            if idx >= 0:
-                before = self.buffer[:idx]
-                if before:
-                    yield (self._channel(), before)
-                self.buffer = self.buffer[idx + len(target):]
-                self.in_thinking = not self.in_thinking
-                continue
-
-            if len(self.buffer) > self.HOLDBACK:
-                safe = self.buffer[:-self.HOLDBACK]
-                yield (self._channel(), safe)
-                self.buffer = self.buffer[-self.HOLDBACK:]
-            return
-
-    def flush(self):
-        if not self.buffer:
-            return
-        if self.in_thinking:
-            logger.warning("Stream ended with unclosed <thinking> tag; flushing %d chars.", len(self.buffer))
-        yield (self._channel(), self.buffer)
-        self.buffer = ""
-
-
 @retry(
     wait=wait_exponential(multiplier=1, min=1, max=10),
     stop=stop_after_attempt(3),
@@ -188,9 +103,6 @@ async def stream_with_tool_calls(
     available_tools: Dict[str, Callable],
     max_turns: int = _DEFAULT_MAX_TURNS,
     extra_body: Optional[Dict[str, Any]] = None,
-    client_secondary=None,
-    secondary_model: str = "",
-    threshold_tokens: int = 800,
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -211,41 +123,62 @@ async def stream_with_tool_calls(
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
-            # --- Non-streaming call with required tool choice ---
+            # --- Non-streaming call with required tool choice (only when tools exist) ---
             try:
-                response = await _call_llm_nonstream(
-                    client_llm, model, messages, tools_schema, extra_body,
-                )
+                if tools_schema:
+                    response = await _call_llm_nonstream(
+                        client_llm, model, messages, tools_schema, extra_body,
+                    )
+                else:
+                    # No tools: stream directly for real-time token-by-token output
+                    response = await _call_llm_stream(
+                        client_llm, model, messages, extra_body,
+                    )
+
             except Exception:
                 yield _make_event("answer_chunk", {"content": SERVER_LOAD_FALLBACK_BN}, "both")
                 raise
 
-            msg = response.choices[0].message
-            tool_calls = msg.tool_calls
-            content = msg.content or ""
-
-            # --- No tool calls = final answer ---
-            if not tool_calls:
-                # Stream the answer text
-                # For non-streaming, just yield it directly
-                if content:
-                    # Handle <thinking> tags in the content
-                    stripper = ThinkingStripper()
-                    for channel, piece in stripper.feed(content):
+            if tools_schema:
+                # Non-streaming path: get message directly
+                msg = response.choices[0].message
+                tool_calls = msg.tool_calls
+                content = msg.content or ""
+            else:
+                # Streaming path: accumulate text from streaming chunks
+                msg_content_parts = []
+                thinking_content_parts = []
+                tool_calls = []
+                content = ""
+                parser = ThinkingParser()
+                async for chunk in response:
+                    delta = chunk.choices[0].delta
+                    text = delta.content or ""
+                    if not text:
+                        continue
+                    for channel, piece in parser.feed(text):
                         if channel == "answer":
+                            msg_content_parts.append(piece)
                             answer_accumulator += piece
                             yield _make_event("answer_chunk", {"content": piece}, "both")
                         else:
+                            thinking_content_parts.append(piece)
                             yield _make_event("reasoning_chunk", {"content": piece}, "debug")
-                    for channel, piece in stripper.flush():
-                        if channel == "answer":
-                            answer_accumulator += piece
-                            yield _make_event("answer_chunk", {"content": piece}, "both")
+                for channel, piece in parser.flush():
+                    if channel == "answer":
+                        msg_content_parts.append(piece)
+                        answer_accumulator += piece
+                        yield _make_event("answer_chunk", {"content": piece}, "both")
+                    else:
+                        thinking_content_parts.append(piece)
+                content = "".join(msg_content_parts)
+
+            # --- No tool calls = final answer ---
+            if not tool_calls:
                 messages.append({"role": "assistant", "content": content})
                 break
 
             # --- Tool calls detected ---
-            # Convert SDK tool_call objects to serializable dicts
             tool_calls_dicts = []
             for tc in tool_calls:
                 tool_calls_dicts.append({
@@ -267,8 +200,8 @@ async def stream_with_tool_calls(
 
             # Emit reasoning/thinking content (if any)
             if content:
-                stripper = ThinkingStripper()
-                for channel, piece in stripper.feed(content):
+                parser = ThinkingParser()
+                for channel, piece in parser.feed(content):
                     if channel == "answer":
                         answer_accumulator += piece
                         yield _make_event("answer_chunk", {"content": piece}, "both")
@@ -329,10 +262,6 @@ async def stream_with_tool_calls(
                     content = f"Tool '{func_name}' not found."
 
                 elapsed = round((time.time() - start) * 1000)
-
-                # Post-tool refine
-                if content and threshold_tokens > 0:
-                    content = _post_tool_refine(content, client_secondary, secondary_model, threshold_tokens)
 
                 return {
                     "name": func_name,
