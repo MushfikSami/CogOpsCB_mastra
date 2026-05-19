@@ -619,7 +619,7 @@ async def run_factual_pipeline(
     # ------------------------------------------------------------
     # Stage 4 — Post-flight
     # ------------------------------------------------------------
-    final_answer, post_events = await _post_flight(
+    final_answer, post_events, sources_block = await _post_flight(
         raw_answer=raw_answer,
         source_map=source_map,
         cfg=cfg,
@@ -630,6 +630,11 @@ async def run_factual_pipeline(
     )
     for ev in post_events:
         yield ev
+
+    # Stream the canonical Sources block as answer_chunk so the UI
+    # shows it incrementally instead of only inside final_answer.
+    if sources_block:
+        yield _evt("answer_chunk", channel="both", content="\n\n" + sources_block)
 
     yield _evt(
         "final_answer", channel="both",
@@ -761,7 +766,7 @@ async def _post_flight(
     secondary_client: AsyncOpenAI,
     secondary_model: str,
     skip_verify: bool = False,
-) -> Tuple[str, List[Dict[str, Any]]]:
+) -> Tuple[str, List[Dict[str, Any]], str]:
     """Strip composer Sources block, strip unknown tags, NLI verify, append
     canonical Sources block.
 
@@ -786,7 +791,7 @@ async def _post_flight(
 
     used_tags = extract_citation_tags(cleaned)
     if not used_tags:
-        return cfg.refusal_text_bn, events
+        return cfg.refusal_text_bn, events, ""
 
     if not skip_verify and cfg.verifier_enabled and secondary_client is not None:
         pairs = extract_citations(cleaned)
@@ -826,9 +831,9 @@ async def _post_flight(
                 ))
 
     if cleaned.strip() == cfg.refusal_text_bn.strip():
-        return cfg.refusal_text_bn, events
+        return cfg.refusal_text_bn, events, ""
 
     used_tags_after = extract_citation_tags(cleaned)
     sources_block = build_sources_block(source_map, used_tags_after)
     final = cleaned.rstrip() + (("\n\n" + sources_block) if sources_block else "")
-    return final, events
+    return final, events, sources_block

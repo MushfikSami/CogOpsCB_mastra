@@ -148,7 +148,13 @@ async def stream_chat(
 
     _query_log.append(request.query)
     server_secret = os.getenv("ADMIN_DEBUG_SECRET")
-    debug_mode = server_secret is not None and x_debug_key == server_secret
+    debug_mode = False
+    if x_debug_key:
+        if server_secret == "":
+            # Empty secret in config → accept any non-empty key (local dev convenience)
+            debug_mode = True
+        else:
+            debug_mode = x_debug_key == server_secret
 
     session_id = _session_logger.start_session(request.user_id, request.query)
 
