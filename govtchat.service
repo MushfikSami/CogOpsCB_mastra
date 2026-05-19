@@ -5,7 +5,8 @@
 
 [Unit]
 Description=GovOps Chat Agent API Service
-After=network.target redis.service
+After=network.target redis.service jiggasha-search.service
+Requires=jiggasha-search.service
 
 [Service]
 Type=simple

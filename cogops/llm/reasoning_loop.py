@@ -1,10 +1,21 @@
 """
 cogops/llm/reasoning_loop.py
 
-The ReAct tool-calling while loop. Two-phase approach:
-- Phase 1: Non-streaming call with tool_choice="required" to force tool calls
-- Phase 2: Streaming call for final answer (when no tool calls)
-- Tool results appended as messages between turns
+The ReAct tool-calling while loop. Grounding-friendly strategy:
+
+  - All tool-calling turns:        non-stream, tool_choice="auto"
+      → LLM decides to call a tool or to finalize. The system prompt and
+        the orchestrator's "refuse if source_map empty" guard together
+        ensure factual questions cannot be answered without retrieval.
+        (Note: tool_choice="required" is not honored reliably by vLLM on
+        the Qwen3.6 endpoint — it returns empty content and empty
+        tool_calls. So we use "auto" with prompt-side enforcement.)
+  - When a turn returns no tool_calls (final answer):
+      → re-issue the same messages as a streaming call for token-level UX.
+  - No tools at all (chit-chat path): stream directly from turn 1.
+
+This also works around the documented Qwen36 streaming-tools bug: tool-calling
+turns stay non-streaming; only the final no-tool-call turn streams.
 """
 
 import asyncio
@@ -56,13 +67,15 @@ async def _call_llm_nonstream(
     messages: List[Dict],
     tools_schema: List[Dict],
     extra_body: Dict,
+    tool_choice: str = "auto",
 ) -> Any:
-    """Non-streaming call with required tool choice."""
+    """Non-streaming call. Caller decides tool_choice (default 'auto'; 'required'
+    is not honored reliably by vLLM on the Qwen3.6 endpoint)."""
     return await client.chat.completions.create(
         model=model,
         messages=messages,
         tools=tools_schema if tools_schema else None,
-        tool_choice="required" if tools_schema else None,
+        tool_choice=tool_choice if tools_schema else None,
         stream=False,
         extra_body=extra_body,
     )
@@ -123,14 +136,21 @@ async def stream_with_tool_calls(
         try:
             yield _make_event("turn_start", {"turn_number": turn_count}, "debug")
 
-            # --- Non-streaming call with required tool choice (only when tools exist) ---
+            # tool_choice strategy: always 'auto' on this vLLM endpoint.
+            # ('required' returns empty content + empty tool_calls — broken in
+            # vLLM for the Qwen3.6 model. Grounding is enforced by the
+            # system prompt + the orchestrator's "no source_map ⇒ refuse" guard.)
+            tool_choice = "auto"
+
+            # --- Phase A: non-streaming tool-calling turn ---
             try:
                 if tools_schema:
                     response = await _call_llm_nonstream(
                         client_llm, model, messages, tools_schema, extra_body,
+                        tool_choice=tool_choice,
                     )
                 else:
-                    # No tools: stream directly for real-time token-by-token output
+                    # No tools (chit-chat path): stream directly
                     response = await _call_llm_stream(
                         client_llm, model, messages, extra_body,
                     )
@@ -140,12 +160,11 @@ async def stream_with_tool_calls(
                 raise
 
             if tools_schema:
-                # Non-streaming path: get message directly
                 msg = response.choices[0].message
                 tool_calls = msg.tool_calls
                 content = msg.content or ""
             else:
-                # Streaming path: accumulate text from streaming chunks
+                # No-tools streaming path
                 msg_content_parts = []
                 thinking_content_parts = []
                 tool_calls = []
@@ -175,6 +194,43 @@ async def stream_with_tool_calls(
 
             # --- No tool calls = final answer ---
             if not tool_calls:
+                # With tools_schema, the non-stream call gave us the full text already.
+                # Re-issue the same messages as a streaming call so the user gets
+                # token-by-token output. The model is deterministic-enough at low temp
+                # for this to produce closely-matching content; the streamed text
+                # replaces 'content' as the official answer.
+                if tools_schema:
+                    try:
+                        stream_response = await _call_llm_stream(
+                            client_llm, model, messages, extra_body,
+                        )
+                        msg_content_parts: List[str] = []
+                        parser = ThinkingParser()
+                        async for chunk in stream_response:
+                            delta = chunk.choices[0].delta
+                            text = delta.content or ""
+                            if not text:
+                                continue
+                            for channel, piece in parser.feed(text):
+                                if channel == "answer":
+                                    msg_content_parts.append(piece)
+                                    answer_accumulator += piece
+                                    yield _make_event("answer_chunk", {"content": piece}, "both")
+                                else:
+                                    yield _make_event("reasoning_chunk", {"content": piece}, "debug")
+                        for channel, piece in parser.flush():
+                            if channel == "answer":
+                                msg_content_parts.append(piece)
+                                answer_accumulator += piece
+                                yield _make_event("answer_chunk", {"content": piece}, "both")
+                            else:
+                                yield _make_event("reasoning_chunk", {"content": piece}, "debug")
+                        content = "".join(msg_content_parts) or content
+                    except Exception as stream_exc:
+                        logger.warning(
+                            "Final-turn re-stream failed (%s); keeping non-stream content.",
+                            stream_exc,
+                        )
                 messages.append({"role": "assistant", "content": content})
                 break
 

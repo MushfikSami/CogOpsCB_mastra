@@ -117,11 +117,24 @@ class TestSystemPrompt:
         assert "## Example 4" in p
         assert "## Example 5" in p
 
-    def test_no_citation_format_in_examples(self):
-        # Citations removed — no tools, no sources
+    def test_citation_format_in_examples(self):
+        # Citation rules ARE enforced — examples must demonstrate the [S#] pattern.
         from cogops.prompts.system import get_system_prompt
         p = get_system_prompt()
-        assert "[src:" not in p
+        assert "[S1]" in p
+        assert "# CITATION FORMAT" in p
+        assert "NO_RELEVANT_RESULTS" in p
+
+    def test_tool_first_protocol_present(self):
+        from cogops.prompts.system import get_system_prompt
+        p = get_system_prompt()
+        assert "TOOL-FIRST PROTOCOL" in p
+        assert "MUST call a retrieval tool" in p
+
+    def test_refusal_template_present(self):
+        from cogops.prompts.system import get_system_prompt
+        p = get_system_prompt()
+        assert "নির্ভরযোগ্য তথ্য পাওয়া যায়নি" in p
 
     def test_thinking_tag_instructions(self):
         from cogops.prompts.system import get_system_prompt
@@ -130,178 +143,95 @@ class TestSystemPrompt:
         assert "Wrap every reasoning step" in p
 
 # ---------------------------------------------------------------------------
-# Memory tools
-# ---------------------------------------------------------------------------
-
-class TestMemoryRead:
-    def test_no_store(self):
-        from cogops.tools.memory import memory_read
-        result = memory_read(user_id="u1")
-        assert "Memory store not available" in result
-
-    def test_no_user_id(self):
-        from cogops.tools.memory import memory_read
-        from cogops.session.redis_store import InMemoryStore
-        result = memory_read(store=InMemoryStore())
-        assert "Missing user_id" in result
-
-    def test_empty_store(self):
-        from cogops.tools.memory import memory_read
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        result = memory_read(user_id="u1", store=store)
-        assert "No memory found" in result
-
-    def test_read_specific_key(self):
-        from cogops.tools.memory import memory_read, memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="passport", value="passport details", user_id="u1", store=store)
-        result = memory_read(key="passport", user_id="u1", store=store)
-        assert "Memory [passport]:" in result
-        assert "passport details" in result
-
-    def test_read_specific_key_not_found(self):
-        from cogops.tools.memory import memory_read, memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="passport", value="details", user_id="u1", store=store)
-        result = memory_read(key="nid", user_id="u1", store=store)
-        assert "No memory found for key 'nid'" in result
-
-    def test_read_all_keys(self):
-        from cogops.tools.memory import memory_read, memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="passport", value="pass info", user_id="u1", store=store)
-        memory_write(key="nid", value="nid info", user_id="u1", store=store)
-        result = memory_read(user_id="u1", store=store)
-        assert "Session memory:" in result
-        assert "[passport]:" in result
-        assert "[nid]:" in result
-        assert "pass info" in result
-        assert "nid info" in result
-
-
-class TestMemoryWrite:
-    def test_no_store(self):
-        from cogops.tools.memory import memory_write
-        result = memory_write(key="k", value="v", user_id="u1")
-        assert "Memory store not available" in result
-
-    def test_no_user_id(self):
-        from cogops.tools.memory import memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        result = memory_write(key="k", value="v", store=store)
-        assert "Missing user_id" in result
-
-    def test_empty_key(self):
-        from cogops.tools.memory import memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        result = memory_write(key="", value="v", user_id="u1", store=store)
-        assert "Memory key cannot be empty" in result
-
-    def test_write_and_verify(self):
-        from cogops.tools.memory import memory_write
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        result = memory_write(key="test_key", value="test_value", user_id="u1", store=store)
-        assert "Memory saved" in result
-        # Verify via memory_read
-        from cogops.tools.memory import memory_read
-        result = memory_read(key="test_key", user_id="u1", store=store)
-        assert "test_value" in result
-
-    def test_write_overwrites(self):
-        from cogops.tools.memory import memory_write, memory_read
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="k", value="v1", user_id="u1", store=store)
-        memory_write(key="k", value="v2", user_id="u1", store=store)
-        result = memory_read(key="k", user_id="u1", store=store)
-        assert "v2" in result
-        assert "v1" not in result
-
-    def test_key_with_special_chars(self):
-        from cogops.tools.memory import memory_write, memory_read
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="passport-2026", value="info", user_id="u1", store=store)
-        result = memory_read(key="passport-2026", user_id="u1", store=store)
-        assert "info" in result
-
-    def test_value_with_unicode(self):
-        from cogops.tools.memory import memory_write, memory_read
-        from cogops.session.redis_store import InMemoryStore
-        store = InMemoryStore()
-        memory_write(key="bangla", value="আশা সেবা", user_id="u1", store=store)
-        result = memory_read(key="bangla", user_id="u1", store=store)
-        assert "আশা সেবা" in result
-
-# ---------------------------------------------------------------------------
-# Tool registry
+# Tool registry (plug-in discovery)
 # ---------------------------------------------------------------------------
 
 class TestToolRegistry:
-    """Registry is currently empty — memory tools disabled to prevent tool loops."""
+    """Registry is config-driven. Empty `enabled` ⇒ empty registry; listing a
+    valid slug imports and registers that tool's module."""
 
-    def test_schema_count(self):
+    def test_empty_enabled_yields_empty_registry(self):
         from cogops.tools.registry import build_tool_registry
-        schemas, _ = build_tool_registry()
-        assert len(schemas) == 0  # no tools registered
+        schemas, tool_map = build_tool_registry(enabled=[])
+        assert schemas == []
+        assert tool_map == {}
 
-    def test_map_count(self):
+    def test_none_enabled_yields_empty_registry(self):
         from cogops.tools.registry import build_tool_registry
-        _, tool_map = build_tool_registry()
-        assert len(tool_map) == 0  # no tools registered
+        schemas, tool_map = build_tool_registry()
+        assert schemas == []
+        assert tool_map == {}
 
-    def test_injectable_params(self):
+    def test_load_jiggasha_tool(self):
+        from cogops.tools.registry import build_tool_registry
+        schemas, tool_map = build_tool_registry(enabled=["jiggasha"])
+        assert len(schemas) == 1
+        assert len(tool_map) == 1
+        assert schemas[0]["function"]["name"] == "search_gov_services"
+        assert "search_gov_services" in tool_map
+
+    def test_schema_enforces_additional_properties_false(self):
+        from cogops.tools.registry import build_tool_registry
+        schemas, _ = build_tool_registry(enabled=["jiggasha"])
+        params = schemas[0]["function"]["parameters"]
+        assert params.get("additionalProperties") is False
+
+    def test_missing_tool_module_raises(self):
+        from cogops.tools.registry import build_tool_registry
+        with pytest.raises(ImportError):
+            build_tool_registry(enabled=["this_tool_does_not_exist"])
+
+    def test_injectable_params_includes_ctx(self):
         from cogops.tools.registry import _INJECTABLE_PARAMS
-        assert set(_INJECTABLE_PARAMS) == {"user_id", "store"}
-        assert "secondary_client" not in _INJECTABLE_PARAMS
-        assert "secondary_model" not in _INJECTABLE_PARAMS
-        assert "secondary" not in _INJECTABLE_PARAMS
+        assert set(_INJECTABLE_PARAMS) == {"user_id", "store", "ctx"}
 
-    def test_bind_tools_empty(self):
+    def test_bind_tools_injects_ctx(self):
+        from functools import partial
         from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
-        from cogops.session.redis_store import InMemoryStore
-        _, tool_map = build_tool_registry()
-        ctx = ToolContext(user_id="u1", store=InMemoryStore())
+        _, tool_map = build_tool_registry(enabled=["jiggasha"])
+        ctx = ToolContext(user_id="u1", store=None)
         bound = bind_tools(tool_map, ctx)
-        assert len(bound) == 0
+        # The jiggasha handler declares (query, ctx) — bind_tools should inject
+        # the ctx instance via functools.partial.keywords.
+        wrapped = bound["search_gov_services"]
+        assert isinstance(wrapped, partial)
+        assert "ctx" in wrapped.keywords
+        assert wrapped.keywords["ctx"] is ctx
 
     def test_bind_tools_no_context(self):
         from cogops.tools.registry import build_tool_registry, bind_tools, ToolContext
-        _, tool_map = build_tool_registry()
+        _, tool_map = build_tool_registry(enabled=[])
         ctx = ToolContext(user_id=None, store=None)
         bound = bind_tools(tool_map, ctx)
         assert len(bound) == 0
 
     def test_no_tool_references_in_system_prompt(self):
         from cogops.prompts.system import SYSTEM_PROMPT
-        assert "Tool returned" not in SYSTEM_PROMPT
-        assert "tool result" not in SYSTEM_PROMPT.lower() or "tool result" in SYSTEM_PROMPT.lower()
+        # Individual tool names should not be enumerated in the prompt —
+        # tools are discoverable from the schema at runtime.
+        assert "search_gov_services" not in SYSTEM_PROMPT
+        assert "search_wikipedia" not in SYSTEM_PROMPT
+        assert "search_web" not in SYSTEM_PROMPT
 
     def test_tool_context_dataclass(self):
         from cogops.tools.registry import ToolContext
         ctx = ToolContext(user_id="u1", store=None)
         assert ctx.user_id == "u1"
         assert ctx.store is None
+        assert ctx.source_map == {}
         assert ctx.tool_map is None
         assert ctx.tools_schema is None
 
-    def test_no_knowledge_tools_in_registry(self):
-        from cogops.tools.registry import build_tool_registry
-        schemas, tool_map = build_tool_registry()
-        names = [t["function"]["name"] for t in schemas]
-        assert "search_knowledge" not in names
-        assert "search_wiki" not in names
-        assert "history_query" not in names
-        assert "search_knowledge" not in tool_map
-        assert "search_wiki" not in tool_map
-        assert "history_query" not in tool_map
+    def test_tool_context_allocates_source_tags_monotonically(self):
+        from cogops.tools.registry import ToolContext
+        ctx = ToolContext(user_id="u1")
+        tag1 = ctx.allocate_source_tag({"text": "first"})
+        tag2 = ctx.allocate_source_tag({"text": "second"})
+        tag3 = ctx.allocate_source_tag({"text": "third"})
+        assert tag1 == "S1"
+        assert tag2 == "S2"
+        assert tag3 == "S3"
+        assert ctx.source_map["S2"]["text"] == "second"
 
 # ---------------------------------------------------------------------------
 # ThinkingParser
@@ -588,6 +518,90 @@ class TestInMemoryStore:
         assert store.get_recent_turns("u2")[0]["user"] == "hey"
 
 # ---------------------------------------------------------------------------
+# Citation extractor + Sources block (cogops/verifier/citations.py)
+# ---------------------------------------------------------------------------
+
+class TestCitations:
+    def test_extract_tags_in_order(self):
+        from cogops.verifier.citations import extract_citation_tags
+        ans = "প্রথমে গিয়ে আবেদন [S1]। তারপর ফি [S2][S1]।"
+        assert extract_citation_tags(ans) == ["S1", "S2", "S1"]
+
+    def test_extract_tags_empty(self):
+        from cogops.verifier.citations import extract_citation_tags
+        assert extract_citation_tags("") == []
+        assert extract_citation_tags("no citations here") == []
+
+    def test_extract_citations_bengali_sentence_split(self):
+        from cogops.verifier.citations import extract_citations
+        # Two Bengali sentences separated by danda
+        ans = "প্রথম তথ্য [S1]। দ্বিতীয় তথ্য [S2]।"
+        pairs = extract_citations(ans)
+        assert len(pairs) == 2
+        tags = [t for t, _ in pairs]
+        assert tags == ["S1", "S2"]
+        # Each sentence is attached to its tag
+        assert "প্রথম তথ্য" in pairs[0][1]
+        assert "দ্বিতীয় তথ্য" in pairs[1][1]
+
+    def test_extract_citations_multi_tag_in_one_sentence(self):
+        from cogops.verifier.citations import extract_citations
+        ans = "ফি এবং প্রক্রিয়া [S1][S2]।"
+        pairs = extract_citations(ans)
+        assert len(pairs) == 2
+        assert pairs[0][1] == pairs[1][1]  # same sentence
+        assert {t for t, _ in pairs} == {"S1", "S2"}
+
+    def test_strip_unknown_tags(self):
+        from cogops.verifier.citations import strip_unknown_tags
+        source_map = {"S1": {"text": "real"}}
+        ans = "real fact [S1]. fake fact [S99]."
+        cleaned, dropped = strip_unknown_tags(ans, source_map)
+        assert "[S1]" in cleaned
+        assert "[S99]" not in cleaned
+        assert dropped == ["S99"]
+
+    def test_strip_unknown_tags_no_change(self):
+        from cogops.verifier.citations import strip_unknown_tags
+        source_map = {"S1": {}, "S2": {}}
+        ans = "x [S1] y [S2]."
+        cleaned, dropped = strip_unknown_tags(ans, source_map)
+        assert cleaned == ans
+        assert dropped == []
+
+    def test_build_sources_block_only_lists_used_tags(self):
+        from cogops.verifier.citations import build_sources_block
+        source_map = {
+            "S1": {"category": "পাসপোর্ট", "topic": "ফি", "passage_id": 1, "tool": "jiggasha"},
+            "S2": {"category": "পাসপোর্ট", "topic": "আবেদন", "passage_id": 2, "tool": "jiggasha"},
+            "S3": {"category": "NID", "topic": "সংশোধন", "passage_id": 9, "tool": "jiggasha"},
+        }
+        # Only S1 and S2 are used in the answer; S3 must NOT appear
+        block = build_sources_block(source_map, used_tags=["S1", "S2", "S1"])
+        assert "**সূত্র (Sources)**" in block
+        assert "[S1]" in block
+        assert "[S2]" in block
+        assert "[S3]" not in block
+
+    def test_build_sources_block_empty_when_no_used_tags(self):
+        from cogops.verifier.citations import build_sources_block
+        block = build_sources_block({"S1": {"topic": "x"}}, used_tags=[])
+        assert block == ""
+
+    def test_build_sources_block_deduplicates_in_order(self):
+        from cogops.verifier.citations import build_sources_block
+        source_map = {
+            "S1": {"topic": "first", "passage_id": 1, "tool": "jiggasha"},
+            "S2": {"topic": "second", "passage_id": 2, "tool": "jiggasha"},
+        }
+        block = build_sources_block(source_map, used_tags=["S2", "S1", "S2", "S1"])
+        # S2 first (first cited), then S1
+        s2_idx = block.find("[S2]")
+        s1_idx = block.find("[S1]")
+        assert 0 < s2_idx < s1_idx
+
+
+# ---------------------------------------------------------------------------
 # Event channels
 # ---------------------------------------------------------------------------
 
@@ -660,18 +674,38 @@ class TestConfig:
     def test_reasoning_section(self):
         from cogops.config.loader import load_config
         cfg = load_config()
-        assert cfg["reasoning"]["max_turns"] == 10
+        # The deterministic pipeline doesn't use the ReAct loop; reasoning.*
+        # is retained only for backward compatibility with the chitchat path.
+        assert cfg["reasoning"]["max_turns"] == 1
         assert cfg["reasoning"]["max_concurrent_query"] == 2
+
+    def test_tools_section_enables_jiggasha(self):
+        from cogops.config.loader import load_config
+        cfg = load_config()
+        assert "tools" in cfg
+        assert "jiggasha" in cfg["tools"]["enabled"]
+        # Reranker is gone; the per-sub top_k surfaces the retrieval cap.
+        assert cfg["tools"]["jiggasha"]["top_k_per_sub"] >= 10
+
+    def test_retrieval_refusal_text_present(self):
+        from cogops.config.loader import load_config
+        cfg = load_config()
+        assert "retrieval" in cfg
+        assert "নির্ভরযোগ্য" in cfg["retrieval"]["refusal_text_bn"]
+        assert "তথ্য" in cfg["retrieval"]["refusal_text_bn"]
 
     def test_session_section(self):
         from cogops.config.loader import load_config
         cfg = load_config()
         assert "redis_url_default" in cfg["session"]
 
-    def test_removed_jiggasha_section(self):
+    def test_removed_top_level_jiggasha_section(self):
+        # jiggasha is now under tools.jiggasha (plug-in registry), not a
+        # top-level section.
         from cogops.config.loader import load_config
         cfg = load_config()
-        assert "jiggasha" not in cfg
+        assert "jiggasha" not in cfg.keys()  # not top-level
+        assert "jiggasha" in cfg.get("tools", {})  # but under tools.
 
     def test_removed_wiki_section(self):
         from cogops.config.loader import load_config
@@ -698,12 +732,24 @@ class TestConfig:
         cfg = load_config()
         assert "token_management" not in cfg
 
-    def test_llm_call_parameters_present(self):
+    def test_pipeline_section_present(self):
+        """LLM rerank moved to Jiggasha; chatbot-side pipeline keeps composer
+        knobs and the disambiguation thresholds. Rerank knobs (keep_cap,
+        weak_per_sub_cap, …) now live under tools.jiggasha.*."""
         from cogops.config.loader import load_config
         cfg = load_config()
-        assert "llm_call_parameters" in cfg
-        assert "thinking_general" in cfg["llm_call_parameters"]
-        assert "max_tokens" in cfg["llm_call_parameters"]
+        assert "pipeline" in cfg
+        assert "composer" in cfg["pipeline"]
+        assert "max_tokens" in cfg["pipeline"]["composer"]
+        assert "disambiguation" in cfg["pipeline"]
+        assert "min_distinct_services" in cfg["pipeline"]["disambiguation"]
+
+        # Rerank knobs now live on Jiggasha (one HTTP call returns vetted
+        # passages). Confirm the chatbot side forwards them.
+        jcfg = cfg.get("tools", {}).get("jiggasha", {})
+        assert jcfg.get("rerank") is True
+        assert "keep_cap" in jcfg
+        assert "weak_per_sub_cap" in jcfg
 
 # ---------------------------------------------------------------------------
 # Messages (fallback strings)
@@ -779,8 +825,10 @@ class TestOrchestrator:
     def test_tools_registry_loaded(self):
         from cogops.agents.orchestrator import Orchestrator
         o = Orchestrator()
-        assert len(o.tools_schema) == 2
-        assert len(o.raw_tool_map) == 2
+        # jiggasha is the only enabled plug-in in configs/config.yml.
+        assert len(o.tools_schema) == 1
+        assert len(o.raw_tool_map) == 1
+        assert "search_gov_services" in o.raw_tool_map
 
     def test_no_tokenizer_or_truncation(self):
         from cogops.agents.orchestrator import Orchestrator
@@ -804,7 +852,7 @@ class TestOrchestrator:
     def test_max_turns_from_config(self):
         from cogops.agents.orchestrator import Orchestrator
         o = Orchestrator()
-        assert o.max_turns == 10
+        assert o.max_turns == 3
 
     def test_max_concurrent_query_from_config(self):
         from cogops.agents.orchestrator import Orchestrator
@@ -831,12 +879,14 @@ class TestOrchestrator:
         o = Orchestrator()
         o.clear_session()  # Should not raise
 
-    def test_prompt_without_knowledge_tools(self):
+    def test_prompt_does_not_enumerate_tool_names(self):
+        # Tool names live in the schema, not the prompt — keeps the prompt
+        # stable as tools evolve.
         from cogops.agents.orchestrator import Orchestrator
         o = Orchestrator()
-        assert "search_knowledge" not in o.system_prompt
-        assert "search_wiki" not in o.system_prompt
-        assert "history_query" not in o.system_prompt
+        assert "search_gov_services" not in o.system_prompt
+        assert "search_wikipedia" not in o.system_prompt
+        assert "search_web" not in o.system_prompt
 
 # ---------------------------------------------------------------------------
 # Setup.py

@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8" />
+<title>GovOps সহকারী</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, "Noto Sans Bengali", sans-serif; }
+  pre, code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .pre-wrap { white-space: pre-wrap; word-break: break-word; }
+  .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  details > summary { cursor: pointer; user-select: none; }
+  details[open] > summary { color: #006a4e; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<div class="min-h-screen flex">
+
+  <!-- ============== Chat column ============== -->
+  <main id="chat-col" class="flex-1 flex flex-col max-w-3xl mx-auto px-4 py-4">
+    <header class="flex items-center justify-between mb-3">
+      <h1 class="text-xl font-semibold text-emerald-800">🇧🇩 GovOps সহকারী</h1>
+      <div class="flex items-center gap-2 text-xs">
+        <span id="health-pill" class="px-2 py-1 rounded-full bg-slate-200">offline</span>
+        <button id="btn-clear" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">Clear</button>
+      </div>
+    </header>
+
+    <div id="chat" class="flex-1 overflow-y-auto scrollbar-thin space-y-3 pr-1"></div>
+
+    <form id="composer" class="mt-3 flex gap-2">
+      <input id="q" type="text" class="flex-1 px-3 py-2 rounded border border-slate-300 focus:outline-none focus:border-emerald-700"
+             placeholder="আপনার প্রশ্ন লিখুন..." autocomplete="off" />
+      <button class="px-4 py-2 rounded bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-50" id="btn-send">Send</button>
+    </form>
+
+    <div class="mt-3 flex items-center gap-2 text-xs text-slate-500">
+      <label class="flex items-center gap-1">
+        Debug key:
+        <input id="debug-key" type="password" class="px-2 py-1 rounded border border-slate-300 w-48"
+               placeholder="empty = user mode" autocomplete="off" />
+      </label>
+      <span id="mode-pill" class="px-2 py-1 rounded-full bg-slate-200">user mode</span>
+      <span class="ml-auto">user_id: <span id="user-id" class="font-mono"></span></span>
+    </div>
+  </main>
+
+  <!-- ============== Debug column ============== -->
+  <aside id="debug-col"
+         class="hidden w-[40%] min-w-[420px] max-w-[640px] border-l border-slate-200 bg-white overflow-y-auto scrollbar-thin">
+    <header class="sticky top-0 px-4 py-2 bg-emerald-700 text-white text-sm font-medium flex items-center justify-between">
+      <span>Debug pane</span>
+      <span id="debug-count" class="text-xs opacity-80"></span>
+    </header>
+    <div id="debug-turns" class="px-3 py-2 space-y-3"></div>
+  </aside>
+
+</div>
+
+<template id="t-debug-turn">
+  <section class="border border-slate-200 rounded p-2">
+    <header class="text-xs font-semibold text-slate-600 mb-1 flex items-center justify-between">
+      <span class="t-title">Turn</span>
+      <span class="t-elapsed text-slate-400"></span>
+    </header>
+    <div class="t-stages text-xs space-y-1"></div>
+    <footer class="t-totals text-[10px] text-slate-500 mt-2 pt-2 border-t border-slate-100"></footer>
+  </section>
+</template>
+
+<script>
+"use strict";
+
+// ---------- IDs ----------
+const SS_KEY_USER = "govops.userId";
+const SS_KEY_DEBUG = "govops.debugKey";
+function getUserId() {
+  let v = sessionStorage.getItem(SS_KEY_USER);
+  if (!v) { v = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36)).slice(0, 8); sessionStorage.setItem(SS_KEY_USER, v); }
+  return v;
+}
+
+const els = {
+  chat:        document.getElementById("chat"),
+  composer:    document.getElementById("composer"),
+  q:           document.getElementById("q"),
+  btnSend:     document.getElementById("btn-send"),
+  btnClear:    document.getElementById("btn-clear"),
+  debugKey:    document.getElementById("debug-key"),
+  debugCol:    document.getElementById("debug-col"),
+  debugTurns:  document.getElementById("debug-turns"),
+  debugCount:  document.getElementById("debug-count"),
+  modePill:    document.getElementById("mode-pill"),
+  healthPill:  document.getElementById("health-pill"),
+  userId:      document.getElementById("user-id"),
+};
+
+els.userId.textContent = getUserId();
+els.debugKey.value = sessionStorage.getItem(SS_KEY_DEBUG) || "";
+syncDebugMode();
+
+els.debugKey.addEventListener("input", () => {
+  sessionStorage.setItem(SS_KEY_DEBUG, els.debugKey.value);
+  syncDebugMode();
+});
+
+function syncDebugMode() {
+  const on = (els.debugKey.value || "").trim().length > 0;
+  els.debugCol.classList.toggle("hidden", !on);
+  els.modePill.textContent = on ? "debug mode" : "user mode";
+  els.modePill.className = "px-2 py-1 rounded-full " + (on ? "bg-emerald-200 text-emerald-900" : "bg-slate-200");
+}
+
+// ---------- Chat rendering ----------
+function bubble(role, text) {
+  const div = document.createElement("div");
+  div.className = "max-w-[85%] px-3 py-2 rounded-lg text-sm pre-wrap " +
+    (role === "user"
+      ? "bg-emerald-700 text-white self-end ml-auto"
+      : "bg-white border border-slate-200 self-start");
+  div.textContent = text;
+  const wrap = document.createElement("div");
+  wrap.className = "flex";
+  if (role === "user") wrap.className += " justify-end";
+  wrap.appendChild(div);
+  els.chat.appendChild(wrap);
+  els.chat.scrollTop = els.chat.scrollHeight;
+  return div;
+}
+
+// ---------- Debug pane ----------
+let debugTurnNode = null;
+let debugTurnCount = 0;
+let debugStages = {};
+let turnT0 = null;
+
+function startDebugTurn(query) {
+  if (!isDebug()) return;
+  debugTurnCount += 1;
+  els.debugCount.textContent = `${debugTurnCount} turn${debugTurnCount === 1 ? "" : "s"}`;
+  const tpl = document.getElementById("t-debug-turn").content.cloneNode(true);
+  const sec = tpl.querySelector("section");
+  sec.querySelector(".t-title").textContent = `Turn ${debugTurnCount} — ${truncate(query, 60)}`;
+  els.debugTurns.prepend(sec);
+  debugTurnNode = sec;
+  debugStages = {};
+  turnT0 = performance.now();
+}
+
+function endDebugTurn() {
+  if (!debugTurnNode) return;
+  const dt = Math.round(performance.now() - turnT0);
+  debugTurnNode.querySelector(".t-elapsed").textContent = `${dt}ms`;
+
+  // Roll up totals across stages
+  const totals = { prompt: 0, completion: 0 };
+  ["router", "rerank", "composer", "nli"].forEach(k => {
+    const u = debugStages[k];
+    if (u && u.prompt) totals.prompt += u.prompt;
+    if (u && u.completion) totals.completion += u.completion;
+  });
+  if (totals.prompt || totals.completion) {
+    debugTurnNode.querySelector(".t-totals").textContent =
+      `total tokens — in: ${totals.prompt}  out: ${totals.completion}`;
+  }
+  debugTurnNode = null;
+}
+
+function pushStage(title, body, opts = {}) {
+  if (!debugTurnNode) return;
+  const wrap = document.createElement("details");
+  wrap.open = !!opts.open;
+  wrap.className = "border border-slate-100 rounded";
+  const sum = document.createElement("summary");
+  sum.className = "px-2 py-1 flex items-center justify-between bg-slate-50";
+  sum.innerHTML = `<span class="font-medium">${escapeHtml(title)}</span>` +
+    `<span class="text-[10px] text-slate-500">${opts.right || ""}</span>`;
+  wrap.appendChild(sum);
+  const content = document.createElement("div");
+  content.className = "p-2";
+  content.appendChild(body);
+  wrap.appendChild(content);
+  debugTurnNode.querySelector(".t-stages").appendChild(wrap);
+}
+
+function kvLine(k, v) {
+  const d = document.createElement("div");
+  d.className = "flex justify-between gap-2";
+  d.innerHTML = `<span class="text-slate-500">${escapeHtml(k)}</span><span class="font-mono text-right">${v == null ? "—" : escapeHtml(String(v))}</span>`;
+  return d;
+}
+
+function jsonBlock(obj) {
+  const pre = document.createElement("pre");
+  pre.className = "mt-1 max-h-96 overflow-y-auto bg-slate-900 text-slate-100 text-[10px] p-2 rounded scrollbar-thin pre-wrap";
+  pre.textContent = JSON.stringify(obj, null, 2);
+  return pre;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function truncate(s, n) {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function tokenStr(u) {
+  if (!u) return "";
+  const p = u.prompt ?? u.prompt_tokens ?? 0;
+  const c = u.completion ?? u.completion_tokens ?? 0;
+  return `in=${p} · out=${c}`;
+}
+
+function isDebug() {
+  return (els.debugKey.value || "").trim().length > 0;
+}
+
+// ---------- Event dispatcher ----------
+function handleEvent(ev, ctx) {
+  const t = ev.type;
+  if (t === "answer_chunk") {
+    ctx.answerBubble.textContent += ev.content || "";
+    els.chat.scrollTop = els.chat.scrollHeight;
+    return;
+  }
+  if (t === "final_answer") {
+    if (typeof ev.content === "string" && ev.content.length > 0) {
+      ctx.answerBubble.textContent = ev.content;
+    }
+    if (isDebug() && ev.source_map) {
+      const wrap = document.createDocumentFragment();
+      wrap.appendChild(kvLine("reason", ev.reason || "—"));
+      const body = document.createElement("div");
+      body.className = "text-xs space-y-1";
+      body.appendChild(wrap);
+      body.appendChild(jsonBlock(ev.source_map));
+      pushStage("final_answer", body);
+    }
+    return;
+  }
+  if (t === "answer_complete") return;
+  if (t === "error") {
+    ctx.answerBubble.textContent = ev.content || "Error.";
+    if (isDebug()) {
+      const body = document.createElement("div");
+      body.appendChild(kvLine("detail", ev.detail || ""));
+      pushStage("error", body, { open: true });
+    }
+    return;
+  }
+
+  // -------- Debug-only stages --------
+  if (!isDebug()) return;
+
+  if (t === "sanitize_verdict") {
+    const body = document.createElement("div");
+    body.appendChild(kvLine("reason", ev.reason || "—"));
+    pushStage("sanitize", body);
+    return;
+  }
+  if (t === "router_done") {
+    debugStages.router = ev.token_usage;
+    const body = document.createElement("div");
+    body.className = "text-xs space-y-1";
+    body.appendChild(kvLine("intent", ev.intent));
+    body.appendChild(kvLine("sub_queries", JSON.stringify(ev.sub_queries || [])));
+    body.appendChild(kvLine("notes", (ev.notes || []).join(" · ") || "—"));
+    body.appendChild(kvLine("tokens", tokenStr(ev.token_usage)));
+    pushStage("router", body, { open: true, right: tokenStr(ev.token_usage) });
+    return;
+  }
+  if (t === "history_loaded") {
+    const body = document.createElement("div");
+    body.appendChild(kvLine("turns", ev.turns));
+    if ((ev.messages || []).length) body.appendChild(jsonBlock(ev.messages));
+    pushStage(`history (${ev.turns} turns)`, body);
+    return;
+  }
+  if (t === "pipeline_start") {
+    pushStage("pipeline_start", kvLine("sub-questions", ev.n_subs));
+    return;
+  }
+  if (t === "retrieval_done") {
+    debugStages.rerank = ev.token_usage;
+    const body = document.createElement("div");
+    body.appendChild(kvLine("passages", ev.passages_returned));
+    body.appendChild(kvLine("degraded", String(!!ev.degraded)));
+    body.appendChild(kvLine("per_sub_counts", JSON.stringify(ev.per_sub_counts || {})));
+    body.appendChild(kvLine("elapsed", `${ev.elapsed_ms ?? "—"} ms`));
+    body.appendChild(kvLine("tokens", tokenStr(ev.token_usage)));
+    if (ev.rerank) {
+      const det = document.createElement("details");
+      det.className = "mt-1";
+      const sum = document.createElement("summary");
+      sum.className = "text-slate-500";
+      sum.textContent = "rerank verdicts";
+      det.appendChild(sum); det.appendChild(jsonBlock(ev.rerank));
+      body.appendChild(det);
+    }
+    if (ev.passages) {
+      const det = document.createElement("details");
+      const sum = document.createElement("summary");
+      sum.className = "text-slate-500";
+      sum.textContent = `full passages (${ev.passages.length})`;
+      det.appendChild(sum); det.appendChild(jsonBlock(ev.passages));
+      body.appendChild(det);
+    }
+    pushStage("retrieval", body, { open: true, right: tokenStr(ev.token_usage) });
+    return;
+  }
+  if (t === "source_map_allocated") {
+    pushStage("source_map", kvLine("tags", (ev.tags || []).join(" ")));
+    return;
+  }
+  if (t === "disambiguate_required") {
+    const body = document.createElement("div");
+    body.appendChild(kvLine("candidates", ev.n_candidates));
+    body.appendChild(kvLine("tags", (ev.tags || []).join(" ")));
+    pushStage("disambiguate", body, { open: true });
+    return;
+  }
+  if (t === "composer_start") {
+    const body = document.createElement("div");
+    body.appendChild(kvLine("model", ev.model));
+    body.appendChild(kvLine("prompt_chars", ev.prompt_chars));
+    body.appendChild(kvLine("n_messages", ev.n_messages));
+    pushStage("composer_start", body);
+    return;
+  }
+  if (t === "composer_done") {
+    debugStages.composer = ev.token_usage;
+    const body = document.createElement("div");
+    body.appendChild(kvLine("answer_chars", ev.chars));
+    body.appendChild(kvLine("tokens", tokenStr(ev.token_usage)));
+    pushStage("composer_done", body, { open: true, right: tokenStr(ev.token_usage) });
+    return;
+  }
+  if (t === "verification_start") {
+    pushStage("verification_start", kvLine("pairs", ev.count));
+    return;
+  }
+  if (t === "verification_result") {
+    debugStages.nli = ev.token_usage;
+    const body = document.createElement("div");
+    body.appendChild(kvLine("pairs", ev.pairs));
+    body.appendChild(kvLine("verdicts", JSON.stringify(ev.verdicts || ev.action || [])));
+    body.appendChild(kvLine("tokens", tokenStr(ev.token_usage)));
+    pushStage("verification_result", body, { right: tokenStr(ev.token_usage) });
+    return;
+  }
+  if (t === "unsupported_claim") {
+    const body = document.createElement("div");
+    body.appendChild(kvLine("tag", ev.tag));
+    body.appendChild(kvLine("action", ev.action));
+    pushStage("unsupported_claim", body);
+    return;
+  }
+
+  // catch-all
+  const body = document.createElement("div");
+  body.appendChild(jsonBlock(ev));
+  pushStage(t || "(unknown)", body);
+}
+
+// ---------- Streaming ----------
+async function sendQuery(query) {
+  bubble("user", query);
+  const answerBubble = bubble("assistant", "");
+  answerBubble.classList.add("animate-pulse");
+
+  startDebugTurn(query);
+
+  const ctx = { answerBubble };
+
+  const headers = { "Content-Type": "application/json" };
+  const debugKey = (els.debugKey.value || "").trim();
+  if (debugKey) headers["X-Debug-Key"] = debugKey;
+
+  let resp;
+  try {
+    resp = await fetch("/chat/stream", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ user_id: getUserId(), query }),
+    });
+  } catch (err) {
+    answerBubble.textContent = "Network error: " + err.message;
+    answerBubble.classList.remove("animate-pulse");
+    endDebugTurn();
+    return;
+  }
+  if (!resp.ok || !resp.body) {
+    const txt = await resp.text();
+    answerBubble.textContent = `HTTP ${resp.status}: ${txt.slice(0, 200)}`;
+    answerBubble.classList.remove("animate-pulse");
+    endDebugTurn();
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let ev;
+      try { ev = JSON.parse(line); } catch (e) { continue; }
+      handleEvent(ev, ctx);
+    }
+  }
+  // flush any tail line
+  if (buf.trim()) {
+    try { handleEvent(JSON.parse(buf.trim()), ctx); } catch (e) {}
+  }
+
+  answerBubble.classList.remove("animate-pulse");
+  endDebugTurn();
+}
+
+// ---------- Wiring ----------
+els.composer.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = els.q.value.trim();
+  if (!q) return;
+  els.q.value = "";
+  els.btnSend.disabled = true;
+  sendQuery(q).finally(() => { els.btnSend.disabled = false; els.q.focus(); });
+});
+
+els.btnClear.addEventListener("click", async () => {
+  try { await fetch("/session/clear", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: getUserId() }),
+  }); } catch (e) {}
+  els.chat.innerHTML = "";
+  els.debugTurns.innerHTML = "";
+  debugTurnCount = 0;
+  els.debugCount.textContent = "";
+});
+
+// ---------- Initial health probe ----------
+(async () => {
+  try {
+    const r = await fetch("/health");
+    if (r.ok) {
+      const j = await r.json();
+      const ok = j.status === "online" && j.llm === "ok";
+      els.healthPill.textContent = ok ? "online" : "degraded";
+      els.healthPill.className = "px-2 py-1 rounded-full " + (ok ? "bg-emerald-200 text-emerald-900" : "bg-amber-200 text-amber-900");
+    }
+  } catch (e) {
+    els.healthPill.textContent = "offline";
+    els.healthPill.className = "px-2 py-1 rounded-full bg-rose-200 text-rose-900";
+  }
+})();
+
+els.q.focus();
+</script>
+</body>
+</html>

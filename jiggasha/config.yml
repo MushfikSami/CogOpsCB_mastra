@@ -1,0 +1,38 @@
+# Jiggasha — data.csv ingestion + vector retrieval + LLM rerank service.
+#
+# /search has two modes (content-driven):
+#   - Legacy single-query : POST {query, top_k} → raw cosine top-K.
+#   - Multi-query rerank  : POST {sub_queries, rerank: true, ...} → embed
+#                           per sub → Qdrant top-K each → merge/dedupe →
+#                           one batched secondary-LLM call → per-sub
+#                           bucketed [passage_id, class] verdicts.
+
+csv_path: "data.csv"
+port: 10000
+
+embedder:
+  url_env: "EMBEDDER_URL"
+  api_key_env: "EMBEDDER_API_KEY"
+  model_env: "EMBEDDER_MODEL"
+  dimension: 4096
+  batch_size: 64
+  timeout: 120
+
+qdrant:
+  url_env: "QDRANT_URL"
+  collection: "jiggasha_data"
+  distance: "Cosine"
+  timeout: 30
+  top_k: 20            # default per-call top-K; caller can override per request
+
+# LLM relevance reranker (multi-query path). All knobs are overrideable per
+# request; values here are defaults.
+rerank:
+  base_url_env: "SECONDARY_BASE_URL"
+  api_key_env: "SECONDARY_API_KEY"
+  model_env: "SECONDARY_MODEL_NAME"
+  timeout_seconds: 30
+  keep_cap: 24                 # final passage cap returned to the chatbot
+  weak_per_sub_cap: 3          # max "weak" backfill per uncovered sub
+  candidate_cap_global: 30     # cap on merged candidates fed to the LLM
+  fallback_cosine_min: 0.50    # cosine safety-net threshold on LLM failure

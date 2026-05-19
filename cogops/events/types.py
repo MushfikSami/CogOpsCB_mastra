@@ -29,3 +29,10 @@ TURN_START_TYPE = "turn_start"
 TURN_END_TYPE = "turn_end"
 ANSWER_COMPLETE_TYPE = "answer_complete"
 ERROR_TYPE = "error"
+
+# Grounding pipeline (steps 4–5)
+INTENT_CLASSIFIED_TYPE = "intent_classified"          # debug: classifier verdict
+VERIFICATION_START_TYPE = "verification_start"        # debug: NLI batch started
+VERIFICATION_RESULT_TYPE = "verification_result"      # debug: NLI summary + policy action
+UNSUPPORTED_CLAIM_TYPE = "unsupported_claim"          # debug: per-claim verdict
+FINAL_ANSWER_TYPE = "final_answer"                    # both: post-verify, post-Sources answer

@@ -18,9 +18,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -58,6 +58,15 @@ session_lock = asyncio.Lock()
 _query_log = QueryLog()
 _session_logger = SessionLogger()
 
+# --- UI ---
+_UI_INDEX_PATH = os.path.join(os.path.dirname(__file__), "cogops", "ui", "index.html")
+try:
+    with open(_UI_INDEX_PATH, "r", encoding="utf-8") as _f:
+        _UI_INDEX_HTML = _f.read()
+except FileNotFoundError:
+    _UI_INDEX_HTML = "<h1>UI bundle missing</h1>"
+    logger.warning("UI bundle not found at %s", _UI_INDEX_PATH)
+
 
 # --- Request models ---
 class ChatRequest(BaseModel):
@@ -85,6 +94,13 @@ async def get_agent_session(user_id: str) -> Orchestrator:
 
 
 # --- Endpoints ---
+@app.get("/ui", response_class=HTMLResponse)
+async def ui_root():
+    """Single-page chat UI. User mode by default; paste a debug key in the
+    page to switch to debug mode (server filters debug events on header)."""
+    return HTMLResponse(content=_UI_INDEX_HTML)
+
+
 @app.get("/health")
 async def health_check():
     """Service health: LLM, Redis."""
@@ -115,8 +131,16 @@ async def health_check():
 
 
 @app.post("/chat/stream")
-async def stream_chat(request: ChatRequest, x_debug_key: Optional[str] = None):
-    """Main chat endpoint. Streams NDJSON events."""
+async def stream_chat(
+    request: ChatRequest,
+    x_debug_key: Optional[str] = Header(None, alias="X-Debug-Key"),
+):
+    """Main chat endpoint. Streams NDJSON events.
+
+    Without a valid `X-Debug-Key` header, the stream is filtered to
+    user-visible events only (answer_chunk / final_answer / answer_complete /
+    fatal error). With the correct key, all debug events pass through.
+    """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 

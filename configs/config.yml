@@ -7,17 +7,19 @@ agent:
   name: "আশা"
   story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি।"
 
-# --- Primary LLM (Agent Reasoning) ---
+# --- Primary LLM (Composer, 256K context) ---
 llm:
   api_key_env: "LLM_API_KEY"
   model_name_env: "LLM_MODEL_NAME"
   base_url_env: "LLM_BASE_URL"
-  max_context_tokens: 32000
+  max_context_tokens: 256000
 
-# --- Reasoning ---
-reasoning:
-  max_turns: 10
-  max_concurrent_query: 2
+# --- Secondary LLM (Router + LLM relevance filter + NLI verifier) ---
+secondary:
+  api_key_env: "SECONDARY_API_KEY"
+  model_name_env: "SECONDARY_MODEL_NAME"
+  base_url_env: "SECONDARY_BASE_URL"
+  max_context_tokens: 128000
 
 # --- Session / Redis ---
 session:
@@ -28,13 +30,54 @@ session:
   query_log_path: "data/query_log.jsonl"
   query_log_retention_days: 10
 
-# --- LLM generation parameters (sent via extra_body to vLLM) ---
-llm_call_parameters:
-  thinking_general:
-    temperature: 1.0
+# --- Tools (Jiggasha is the sole retrieval source for now) ---
+# Jiggasha's multi-query /search returns LLM-reranked, per-sub bucketed
+# passages. The chatbot makes ONE POST per turn.
+tools:
+  enabled: [jiggasha]
+  jiggasha:
+    endpoint_env: JIGGASHA_ENDPOINT          # http://localhost:10000/search
+    timeout_seconds: 45                        # Qdrant + LLM rerank in one call
+    rerank: true                               # request server-side LLM rerank
+    top_k_per_sub: 20                          # Qdrant top-K each sub-query asks for
+    candidate_cap_global: 30                   # merged candidate cap before LLM rerank
+    keep_cap: 24                               # final [S#] cap returned to composer
+    weak_per_sub_cap: 3                        # weak backfill per uncovered sub
+    fallback_cosine_min: 0.50                  # safety-net cosine when LLM fails
+
+# --- Deterministic pipeline knobs (composer + disambiguation) ---
+pipeline:
+  composer:
+    # Very low temperature — borderline retrieval cases produce mode-mixed
+    # answers (procedure paragraph + bullet list) at higher temps. Keep ≤0.1
+    # so the composer follows the ANSWER SHAPE rule deterministically.
+    temperature: 0.1
     top_p: 0.95
-    top_k: 20
-    min_p: 0.0
-    presence_penalty: 1.5
-    repetition_penalty: 1.0
-  max_tokens: 2048
+    max_tokens: 2048
+  disambiguation:
+    # Fire when ≥ this many distinct (category, sub_category) tuples appear
+    # in the yes/weak-set AND the normalized intent is short.
+    min_distinct_services: 2
+    short_query_token_cap: 6
+    # Cap on how many candidate services to surface to the user — avoids
+    # overwhelming "15 choices" answers for ultra-generic queries.
+    candidate_cap: 6
+
+# --- Retrieval / refusal text ---
+retrieval:
+  refusal_text_bn: "দুঃখিত, এই প্রশ্নের জন্য নির্ভরযোগ্য সরকারি তথ্য পাওয়া যায়নি।"
+  political_refusal_text_bn: "আমি একটি নিরপেক্ষ সরকারি সেবা সহকারী। রাজনৈতিক বা ধর্মীয় বিষয়ে মতামত দেওয়া আমার পক্ষে সম্ভব নয়।"
+  personal_law_refusal_text_bn: "এই প্রশ্নটি ব্যক্তিগত আইন বা ধর্মীয় বিধানের পরামর্শের বিষয় — এতে নির্ভরযোগ্য সরকারি সেবার তথ্য নেই। সঠিক উত্তরের জন্য সংশ্লিষ্ট বিশেষজ্ঞের (আইনজীবী, কাজী অফিস, বা মুফতি) সাথে পরামর্শ করুন।"
+  input_invalid_refusal_bn: "দুঃখিত, প্রশ্নটি বোঝা গেল না বা সীমার বাইরে। অনুগ্রহ করে স্পষ্ট, সংক্ষিপ্ত প্রশ্ন করুন।"
+  chitchat_greeting_bn: "স্বাগতম! আমি বাংলাদেশ সরকারের সেবা সম্পর্কিত প্রশ্নে সাহায্য করতে পারি — যেমন এনআইডি, পাসপোর্ট, ট্যাক্স, সনদ, ইত্যাদি। আপনি কোন বিষয়ে জানতে চান?"
+
+# --- NLI verifier (Stage 4 post-flight; non-blocking) ---
+verifier:
+  enabled: true              # 117/117 e2e gate passed; enabling redact policy
+  policy: redact             # redact | refuse | warn
+  timeout_seconds: 6
+
+# --- Reasoning (legacy ReAct loop; retained only for unit-test compatibility) ---
+reasoning:
+  max_turns: 1
+  max_concurrent_query: 2
