@@ -161,21 +161,20 @@ def _llm_response(content: str):
     )
 
 
-class TestRouterFastPath(unittest.TestCase):
-    """Fast-path triggers ONLY for: ≥30% Bengali + single question + domain vocab."""
+class TestRouterNoClientFallback(unittest.TestCase):
+    """When no secondary LLM client is available, all queries fall back to
+    raw-query factual_govt (except hard-refusal shortcuts)."""
 
     def _run(self, query: str) -> RouterResult:
         return asyncio.run(route(query, secondary_client=None, secondary_model=""))
 
-    def test_pure_bengali_passport_skips_llm(self):
+    def test_pure_bengali_passport_fallback_raw(self):
         r = self._run("পাসপোর্ট ফি কত টাকা?")
         self.assertEqual(r.intent, "factual_govt")
         self.assertEqual(r.sub_queries_bengali, ["পাসপোর্ট ফি কত টাকা?"])
-        self.assertTrue(any("fast_path" in n for n in r.notes))
+        self.assertTrue(any("no_secondary_client" in n for n in r.notes))
 
-    def test_english_does_not_fast_path(self):
-        # English question with no Bengali → no fast-path; no LLM client →
-        # falls back to factual_govt with the raw query.
+    def test_english_fallback_raw(self):
         r = self._run("How much is the passport fee?")
         self.assertEqual(r.intent, "factual_govt")
         self.assertEqual(r.sub_queries_bengali, ["How much is the passport fee?"])
@@ -310,6 +309,20 @@ class TestRouterLLMPath(unittest.TestCase):
         ))
         self.assertEqual(r.intent, "factual_govt")
         self.assertTrue(any("unknown_intent" in n for n in r.notes))
+
+    def test_colloquial_reformulated_to_formal_bengali(self):
+        """The LLM router should map colloquial loanwords to formal Bengali terms."""
+        client = self._mock(json.dumps({
+            "intent": "factual_govt",
+            "sub_queries_bengali": ["বিমানের টিকিট কাটার নিয়ম"],
+        }))
+        r = asyncio.run(route(
+            "আচ্ছা প্লেনের টিকেট কিভাবে কাটবো?",
+            secondary_client=client,
+            secondary_model="qwen36",
+        ))
+        self.assertEqual(r.intent, "factual_govt")
+        self.assertEqual(r.sub_queries_bengali, ["বিমানের টিকিট কাটার নিয়ম"])
 
 
 class TestRouterTimeout(unittest.TestCase):

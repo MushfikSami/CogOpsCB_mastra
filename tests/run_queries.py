@@ -206,9 +206,9 @@ def main():
     orch.verifier_enabled = not args.no_verifier
 
     print(
-        f"Orchestrator ready: tools={list(orch.raw_tool_map.keys())} "
-        f"intent_classifier={orch.intent_classifier_enabled} "
-        f"verifier={orch.verifier_enabled}"
+        f"Orchestrator ready: agent={orch.agent_name} "
+        f"primary={orch.llm_service.model} "
+        f"secondary={orch.secondary_service.model}"
     )
 
     out_path = Path(args.out) if args.out else (
@@ -227,9 +227,9 @@ def main():
              open(summary_path, "w", encoding="utf-8") as f_sum:
             f_sum.write(f"Test run @ {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f_sum.write(
-                f"intent_classifier={orch.intent_classifier_enabled} "
-                f"verifier={orch.verifier_enabled} "
-                f"tools={list(orch.raw_tool_map.keys())}\n\n"
+                f"agent={orch.agent_name} "
+                f"primary={orch.llm_service.model} "
+                f"secondary={orch.secondary_service.model}\n\n"
             )
             for idx in wanted:
                 if idx < 1 or idx > len(queries):

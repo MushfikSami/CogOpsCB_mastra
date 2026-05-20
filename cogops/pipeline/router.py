@@ -169,10 +169,27 @@ INTENT CLASSIFICATION:
 SUB-QUERY EXTRACTION:
 
   For factual_govt, split the message into up to 3 distinct sub-questions
-  and TRANSLATE each to natural Bengali. If the message already contains
-  only one question, return a single-element list. Comparative questions
-  ("which takes longer NID or passport?") count as ONE sub-question — do
-  not split them; the downstream composer will handle the comparison.
+  and TRANSLATE each to formal, search-optimized Bengali. Follow these
+  rules strictly:
+
+  1. REPLACE colloquial or English loanwords with standard Bengali
+     government-service terms:
+     • প্লেন → বিমান
+     • ট্রেন → রেল
+     • টিকেট → টিকিট
+  2. REMOVE conversational fillers such as আচ্ছা, ভাই, দেখেন, শুনুন,
+     বলুন তো, একটু, কিন্তু, তাই, তাহলে.
+  3. Write CONCISE sub-queries suitable for embedding retrieval — avoid
+     long story-like framing.
+  4. If the user mentions a specific document, certificate, or service
+     type (e.g., বিবাহ সনদ, জন্ম সনদ, এনআইডি, পাসপোর্ট, এসএসসি সনদ),
+     you MUST include that exact document type in the sub-query. Do NOT
+     drop the document type and reduce the query to a generic action.
+  5. If the message already contains only one question, return a single-
+     element list.
+  6. Comparative questions ("which takes longer NID or passport?") count
+     as ONE sub-question — do not split them; the downstream composer
+     will handle the comparison.
 
   For chitchat or political_refuse, return an empty list.
 
@@ -196,8 +213,14 @@ Output: {"intent":"chitchat","sub_queries_bengali":[]}
 User: "show me the photo of the president of bangladesh"
 Output: {"intent":"factual_govt","sub_queries_bengali":["বাংলাদেশের রাষ্ট্রপতি কে?"]}
 
+User: "আচ্ছা প্লেনের টিকেট কিভাবে কাটবো?"
+Output: {"intent":"factual_govt","sub_queries_bengali":["বিমানের টিকিট কাটার নিয়ম"]}
+
+User: "বিয়ের সার্টিফিকেটে নাম পরিবর্তন"
+Output: {"intent":"factual_govt","sub_queries_bengali":["বিবাহ সনদে নাম সংশোধন"]}
+
 User: "how to do passport - which takes longer nid or passport? where to go for plane tickets?"
-Output: {"intent":"factual_govt","sub_queries_bengali":["পাসপোর্ট করার পদ্ধতি কী?","এনআইডি ও পাসপোর্ট - কোনটির আবেদন প্রক্রিয়া বেশি সময় নেয়?","বিমানের টিকেট কোথা থেকে কিনব?"]}
+Output: {"intent":"factual_govt","sub_queries_bengali":["পাসপোর্ট করার পদ্ধতি কী?","এনআইডি ও পাসপোর্ট - কোনটির আবেদন প্রক্রিয়া বেশি সময় নেয়?","বিমানের টিকিট কোথা থেকে কিনব?"]}
 
 Output ONLY the JSON object. No markdown fences, no prose.
 """
@@ -338,22 +361,7 @@ async def route(
             notes=notes,
         )
 
-    # 2. Fast-path: pure Bengali, single question, domain vocab match → skip LLM.
-    bn_frac = _bengali_fraction(text)
-    if (
-        bn_frac >= 0.30
-        and _looks_single_question(text)
-        and _DOMAIN_RE.search(text)
-    ):
-        notes.append(f"fast_path_bengali (bn_frac={bn_frac:.2f})")
-        return RouterResult(
-            intent="factual_govt",
-            sub_queries_bengali=[text],
-            raw_query=text,
-            notes=notes,
-        )
-
-    # 3. LLM path. Fail-soft on any error.
+    # 2. LLM path. Fail-soft on any error.
     if secondary_client is None:
         notes.append("no_secondary_client_fallback")
         return RouterResult(

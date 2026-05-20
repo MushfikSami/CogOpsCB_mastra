@@ -39,6 +39,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 from openai import AsyncOpenAI
 
+from cogops.pipeline.normalize import normalize_sub_queries
+from cogops.pipeline.query_expand import check_document_type_match, expand_sub_queries
 from cogops.pipeline.router import RouterResult
 from cogops.prompts.composer import get_composer_prompt
 from cogops.prompts.time_reminder import build_time_reminder
@@ -442,7 +444,8 @@ async def run_factual_pipeline(
     assert router_result.intent == "factual_govt", (
         "run_factual_pipeline received non-factual intent; route correctly upstream"
     )
-    sub_queries = router_result.sub_queries_bengali or [raw_query]
+    sub_queries = normalize_sub_queries(router_result.sub_queries_bengali or [raw_query])
+    sub_queries = expand_sub_queries(sub_queries)
     yield _evt("pipeline_start", n_subs=len(sub_queries))
 
     # ------------------------------------------------------------
@@ -506,6 +509,24 @@ async def run_factual_pipeline(
         n_sources=len(source_map),
         tags=list(source_map.keys()),
     )
+
+    # Document-type guard: if the user explicitly asked for a specific
+    # document type (e.g., marriage certificate) and NONE of the retrieved
+    # passages match that type, refuse instead of offering irrelevant
+    # disambiguation options.
+    if not check_document_type_match(raw_query, source_map):
+        yield _evt(
+            "document_type_mismatch", channel="debug",
+            note="retrieved passages do not match user's explicit document type",
+        )
+        yield _evt("answer_chunk", channel="both", content=cfg.refusal_text_bn)
+        yield _evt(
+            "final_answer", channel="both",
+            content=cfg.refusal_text_bn, source_map={},
+            reason="document_type_mismatch",
+        )
+        yield _evt("answer_complete", channel="both")
+        return
 
     disambiguate, disambig_candidates = _detect_disambiguation(
         source_map, raw_query, sub_queries, cfg,

@@ -148,6 +148,18 @@ Then classify each passage:
                        Useful background; NOT a direct answer.
   - DROP unrelated passages by omitting them (treated as "no").
 
+When judging relevance, treat informal or English loanwords as equivalent
+to their formal Bengali counterparts used in the corpus. For example, a
+query mentioning "প্লেন" should match passages about "বিমান", and "ট্রেন"
+should match "রেল" passages.
+
+Pay close attention to the DOCUMENT TYPE the user is asking about. A
+passage about NID name correction is NOT a direct answer for a query about
+marriage-certificate name correction, even if both involve "name change" and
+"marriage". When the user names a specific document (e.g., বিবাহ সনদ,
+এনআইডি, পাসপোর্ট), passages about a DIFFERENT document type should be
+classified as "weak" at best.
+
 Be strict on "yes". If you cannot find a sentence in the passage that
 mentions the user's exact subject by name, the passage is at most "weak".
 "Same domain" is not enough — there must be subject overlap. When in
