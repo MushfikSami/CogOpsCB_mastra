@@ -48,7 +48,7 @@ class QueryLog:
         entry = json.dumps({
             "query": query,
             "timestamp": _now_bdt().isoformat(),
-        }, ensure_ascii=True)
+        }, ensure_ascii=False)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
         # Prune after every append so stale data never accumulates.

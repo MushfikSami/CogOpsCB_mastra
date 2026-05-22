@@ -181,10 +181,9 @@ class TestHappyPath(unittest.TestCase):
 class TestRefusalPaths(unittest.TestCase):
     def test_empty_jiggasha_emits_refusal_no_llm(self):
         http = httpx.AsyncClient(transport=_jiggasha_transport([], {"1": []}))
-        secondary_create = AsyncMock(side_effect=AssertionError("secondary must not be called"))
-        secondary = SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(create=secondary_create)),
-        )
+        # Secondary LLM may be called for query expansion (fast-path misses on
+        # "x?"), but must NOT be called for NLI verification or composer.
+        secondary = _mock_secondary_nli()
         primary_create = AsyncMock(side_effect=AssertionError("primary must not be called"))
         primary = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=primary_create)),
@@ -206,7 +205,6 @@ class TestRefusalPaths(unittest.TestCase):
         final = next(e for e in events if e["type"] == "final_answer")
         self.assertEqual(final["reason"], "no_passages")
         self.assertIn("নির্ভরযোগ্য", final["content"])
-        secondary_create.assert_not_awaited()
         primary_create.assert_not_awaited()
 
     def test_jiggasha_http_failure_emits_refusal(self):
@@ -218,10 +216,8 @@ class TestRefusalPaths(unittest.TestCase):
         primary = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=primary_create)),
         )
-        secondary_create = AsyncMock(side_effect=AssertionError("secondary must not be called"))
-        secondary = SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(create=secondary_create)),
-        )
+        # Secondary LLM may be called for query expansion before Jiggasha.
+        secondary = _mock_secondary_nli()
 
         events = asyncio.run(_drain(run_factual_pipeline(
             raw_query="x?",

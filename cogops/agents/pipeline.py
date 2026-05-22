@@ -40,7 +40,10 @@ import httpx
 from openai import AsyncOpenAI
 
 from cogops.pipeline.normalize import normalize_sub_queries
-from cogops.pipeline.query_expand import check_document_type_match, expand_sub_queries
+from cogops.pipeline.query_expand import (
+    check_document_type_match,
+    expand_sub_queries_llm,
+)
 from cogops.pipeline.router import RouterResult
 from cogops.prompts.composer import get_composer_prompt
 from cogops.prompts.time_reminder import build_time_reminder
@@ -293,10 +296,23 @@ def _detect_disambiguation(
     if not _intent_is_short(sub_queries, raw_query, cfg.disambig_short_query_token_cap):
         return False, []
 
-    candidate_entries: List[Tuple[str, Dict[str, Any]]] = [
+    # If at least one passage earned a "yes" verdict, we only consider
+    # yes-verdict passages for disambiguation.  A single strong match
+    # (e.g. exact topic) should not be diluted by weak also-rans from
+    # unrelated sub-categories.  When there are no yes verdicts we fall
+    # back to weak ones — that preserves disambiguation for short/generic
+    # queries where the reranker is stingy with yes votes.
+    yes_entries = [
         (tag, meta) for tag, meta in source_map.items()
-        if meta.get("verdict") in ("yes", "weak")
+        if meta.get("verdict") == "yes"
     ]
+    if yes_entries:
+        candidate_entries = yes_entries
+    else:
+        candidate_entries = [
+            (tag, meta) for tag, meta in source_map.items()
+            if meta.get("verdict") == "weak"
+        ]
     if not candidate_entries:
         return False, []
 
@@ -445,7 +461,9 @@ async def run_factual_pipeline(
         "run_factual_pipeline received non-factual intent; route correctly upstream"
     )
     sub_queries = normalize_sub_queries(router_result.sub_queries_bengali or [raw_query])
-    sub_queries = expand_sub_queries(sub_queries)
+    sub_queries = await expand_sub_queries_llm(
+        sub_queries, secondary_client, secondary_model,
+    )
     yield _evt("pipeline_start", n_subs=len(sub_queries))
 
     # ------------------------------------------------------------
