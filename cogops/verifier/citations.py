@@ -104,9 +104,15 @@ def build_sources_block(
         topic = meta.get("topic", "")
         passage_id = meta.get("passage_id", "")
         tool = meta.get("tool", "")
+        chunk_type = meta.get("chunk_type", "")
         descriptor_bits = [b for b in (category, topic) if b]
         descriptor = " — ".join(descriptor_bits) if descriptor_bits else "(no metadata)"
         suffix = f" · passage_id {passage_id}" if passage_id != "" else ""
         tool_suffix = f" ({tool})" if tool else ""
-        lines.append(f"- [{tag}] {descriptor}{suffix}{tool_suffix}")
+        source_label = ""
+        if chunk_type == "wiki":
+            source_label = " · উইকিপিডিয়া"
+        elif chunk_type == "govt_service":
+            source_label = " · সরকারি সেবা"
+        lines.append(f"- [{tag}] {descriptor}{suffix}{tool_suffix}{source_label}")
     return "\n".join(lines)

@@ -216,3 +216,4 @@ workspace/*
 ingestion/dataexplore/
 dockers/*
 claude.md
+jiggasha/wiki_chunks/

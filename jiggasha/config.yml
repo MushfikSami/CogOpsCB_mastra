@@ -20,7 +20,7 @@ embedder:
 
 qdrant:
   url_env: "QDRANT_URL"
-  collection: "jiggasha_data"
+  collection: "bnwiki_chunks"
   distance: "Cosine"
   timeout: 30
   top_k: 20            # default per-call top-K; caller can override per request

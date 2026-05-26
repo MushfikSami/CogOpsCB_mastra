@@ -76,6 +76,7 @@ class RerankCandidate:
     sub_category: str = ""
     service: str = ""
     topic: str = ""
+    chunk_type: str = ""
     sub_indices: List[int] = field(default_factory=list)
 
 

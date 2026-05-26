@@ -77,6 +77,7 @@ class PipelineConfig:
     keep_cap: int = 24
     weak_per_sub_cap: int = 3
     fallback_cosine_min: float = 0.50
+    chunk_type: Optional[str] = None   # "govt_service" | "wiki" | null
 
     # Composer
     composer_temperature: float = 0.1
@@ -133,6 +134,7 @@ async def _call_jiggasha(
         "keep_cap": cfg.keep_cap,
         "weak_per_sub_cap": cfg.weak_per_sub_cap,
         "fallback_cosine_min": cfg.fallback_cosine_min,
+        "chunk_type": cfg.chunk_type,
     }
     last_exc: Optional[Exception] = None
     for attempt in range(3):
@@ -213,6 +215,7 @@ def _allocate_source_map_from_rerank(
             "sub_category": p.get("sub_category", "") or "",
             "service": p.get("service", "") or "",
             "topic": p.get("topic", "") or "",
+            "chunk_type": p.get("chunk_type", "") or "",
             "score": float(p.get("score", 0.0)),
             "verdict": verdict,
             "verdict_by_sub": dict(verdict_by_sub),
@@ -268,7 +271,16 @@ def _detect_disambiguation(
     raw_query: str,
     sub_queries: List[str],
     cfg: PipelineConfig,
+    intent: str = "factual_govt",
 ) -> Tuple[bool, List[Tuple[str, str]]]:
+    """Decide whether the answer should ask for clarification.
+
+    Skip disambiguation for factual_wiki / factual_mixed intents:
+    wiki corpus naturally spans many distinct (category, sub_category)
+    pairs, so disambiguation is not meaningful for encyclopedia queries.
+    """
+    if intent in ("factual_wiki", "factual_mixed"):
+        return False, []
     """Decide whether the answer should ask for clarification.
 
     Triggers when:
@@ -381,6 +393,12 @@ def _build_composer_user_message(
                 v = meta.get(key, "") or ""
                 if v:
                     hb.append(f"{label}: {v}")
+            # Source-type label for unified corpus
+            chunk_type = meta.get("chunk_type", "")
+            if chunk_type == "wiki":
+                hb.append("উৎস: উইকিপিডিয়া")
+            elif chunk_type == "govt_service":
+                hb.append("উৎস: সরকারি সেবা")
             header = " | ".join(hb) if hb else "—"
             ctx_parts.append("")
             ctx_parts.append(f"[{tag}] ({header})")
@@ -452,12 +470,12 @@ async def run_factual_pipeline(
 
     Caller handles Stages 0 (sanitize) and 1 (router), and routes
     chitchat/political-refuse intents to their static handlers. This function
-    requires router_result.intent == "factual_govt".
+    requires router_result.intent in {factual_govt, factual_wiki, factual_mixed}.
 
     Yields events; the caller forwards them to the API/UI. Channel filtering
     happens at the API boundary.
     """
-    assert router_result.intent == "factual_govt", (
+    assert router_result.intent in ("factual_govt", "factual_wiki", "factual_mixed"), (
         "run_factual_pipeline received non-factual intent; route correctly upstream"
     )
     sub_queries = normalize_sub_queries(router_result.sub_queries_bengali or [raw_query])
@@ -548,6 +566,7 @@ async def run_factual_pipeline(
 
     disambiguate, disambig_candidates = _detect_disambiguation(
         source_map, raw_query, sub_queries, cfg,
+        intent=router_result.intent,
     )
     if disambiguate:
         yield _evt(

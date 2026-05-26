@@ -170,32 +170,67 @@ class SearchRequest(BaseModel):
     weak_per_sub_cap: Optional[int] = None
     fallback_cosine_min: Optional[float] = None
     rerank_timeout: Optional[float] = None
+    chunk_type: Optional[str] = None   # "wiki" | "govt_service" | null
 
 
 # ============================================================ #
 # Shared helpers
 # ============================================================ #
 
-def _qdrant_topk(query_vec: List[float], top_k: int) -> List[Any]:
+def _qdrant_topk(query_vec: List[float], top_k: int, chunk_type: Optional[str] = None) -> List[Any]:
     """Sync Qdrant call. Caller is responsible for offloading from event loop."""
     if qdrant_client is None:
         raise RuntimeError("Qdrant client not initialised")
+    query_filter = None
+    if chunk_type:
+        from qdrant_client import models
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="chunk_type",
+                    match=models.MatchValue(value=chunk_type),
+                )
+            ]
+        )
     return qdrant_client.query_points(
         collection_name=_cfg["qdrant"]["collection"],
         query=query_vec,
         limit=top_k,
+        query_filter=query_filter,
     ).points
 
 
 def _hit_to_passage(hit: Any) -> Dict[str, Any]:
     payload = hit.payload or {}
+
+    # passage_id: old schema has integer; new unified schema may not.
+    # Fall back to a deterministic hash of the Qdrant point ID.
+    pid_raw = payload.get("passage_id")
+    if pid_raw is not None:
+        passage_id = int(pid_raw)
+    else:
+        id_str = str(hit.id)
+        try:
+            passage_id = int(id_str)
+        except ValueError:
+            # UUID or other string id: use last 8 hex chars as int
+            hex_part = id_str.replace("-", "")[-8:]
+            passage_id = int(hex_part, 16)
+
+    # Schema mapping: unified (bnwiki_chunks) → legacy (pipeline expects)
+    category = payload.get("category") or payload.get("page_title", "")
+    sub_category = payload.get("sub_category") or payload.get("section", "")
+    service = payload.get("service") or payload.get("subsection", "")
+    topic = payload.get("topic") or payload.get("page_title", "")
+
     return {
-        "passage_id": int(payload.get("passage_id", 0)),
+        "passage_id": passage_id,
         "text": payload.get("text", ""),
-        "category": payload.get("category", ""),
-        "sub_category": payload.get("sub_category", ""),
-        "service": payload.get("service", ""),
-        "topic": payload.get("topic", ""),
+        "category": category,
+        "sub_category": sub_category,
+        "service": service,
+        "topic": topic,
+        "chunk_type": payload.get("chunk_type", ""),
         "score": float(hit.score) if hasattr(hit, "score") and hit.score is not None else 0.0,
     }
 
@@ -258,7 +293,7 @@ async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
 
     top_k = req.top_k or _cfg["qdrant"].get("top_k", 20)
     try:
-        hits = await asyncio.to_thread(_qdrant_topk, query_vec, top_k)
+        hits = await asyncio.to_thread(_qdrant_topk, query_vec, top_k, req.chunk_type)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant search failed: {e}")
 
@@ -277,13 +312,13 @@ async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
 
 
 async def _embed_and_query(
-    sub_idx: int, query: str, top_k: int,
+    sub_idx: int, query: str, top_k: int, chunk_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Embed + Qdrant top-K for one sub-query. Annotates each hit with sub_idx."""
     if embedder is None:
         raise RuntimeError("Embedder not initialised")
     vec = await asyncio.to_thread(embedder.embed, query)
-    hits = await asyncio.to_thread(_qdrant_topk, vec, top_k)
+    hits = await asyncio.to_thread(_qdrant_topk, vec, top_k, chunk_type)
     out: List[Dict[str, Any]] = []
     for h in hits or []:
         p = _hit_to_passage(h)
@@ -315,6 +350,7 @@ def _merge_candidates(
                     sub_category=p.get("sub_category", ""),
                     service=p.get("service", ""),
                     topic=p.get("topic", ""),
+                    chunk_type=p.get("chunk_type", ""),
                     sub_indices=[sub_idx],
                 )
             else:
@@ -340,8 +376,9 @@ async def _search_multi(req: SearchRequest) -> Dict[str, Any]:
     t0 = time.time()
     top_k = req.top_k_per_sub or _cfg["qdrant"].get("top_k", 20)
     try:
+        chunk_type = req.chunk_type
         per_sub = await asyncio.gather(*[
-            _embed_and_query(i, q, top_k) for i, q in enumerate(sub_queries)
+            _embed_and_query(i, q, top_k, chunk_type) for i, q in enumerate(sub_queries)
         ])
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Retrieval failed: {e}")
@@ -423,6 +460,7 @@ def _candidate_to_passage(c: RerankCandidate) -> Dict[str, Any]:
         "sub_category": c.sub_category,
         "service": c.service,
         "topic": c.topic,
+        "chunk_type": c.chunk_type,
         "score": c.score,
     }
 

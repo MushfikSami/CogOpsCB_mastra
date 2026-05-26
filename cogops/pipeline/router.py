@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 Intent = Literal[
     "factual_govt",
+    "factual_wiki",
+    "factual_mixed",
     "chitchat",
     "political_refuse",
     "personal_law_refuse",
@@ -143,7 +145,7 @@ given ONE user message (in Bengali, English, Banglish, or mixed).
 You must output JSON with two fields and nothing else:
 
   {
-    "intent": "factual_govt" | "chitchat" | "political_refuse",
+    "intent": "factual_govt" | "factual_wiki" | "factual_mixed" | "chitchat" | "political_refuse",
     "sub_queries_bengali": ["<sub-question 1 in Bengali>", ...]
   }
 
@@ -157,6 +159,21 @@ INTENT CLASSIFICATION:
     minister, president, secretary, military chief). These are state facts,
     not political opinions. When in doubt, classify as factual_govt.
 
+  • "factual_wiki": General-knowledge questions about Bangladesh history,
+    geography, culture, notable persons, science, sports, literature, places,
+    events, biographies, definitions, etc. — topics that would appear in an
+    encyclopedia rather than a government service portal.
+    Examples: "বাংলাদেশের স্বাধীনতা যুদ্ধ কবে শুরু হয়?",
+    "রবীন্দ্রনাথ ঠাকুরের জন্মস্থান কোথায়?", "সুন্দরবনের আয়তন কত?",
+    "বাংলাদেশের জাতীয় ফুলের নাম কি?"
+
+  • "factual_mixed": Questions that could reasonably be answered by EITHER
+    government-service data OR general knowledge, or questions that combine
+    both domains. Examples: "বাংলাদেশের প্রধানমন্ত্রী কে?" (govt record +
+    wiki bio), "ঢাকা বিশ্ববিদ্যালয়ের ইতিহাস" (wiki + possibly govt edu
+    records). When in doubt between govt and wiki, classify as factual_mixed
+    rather than guessing.
+
   • "chitchat": pure greetings, thanks, "who are you", or one-line
     conversational fillers with ZERO domain nouns and no factual question.
     Examples: "hello", "hi bro", "thanks", "তুমি কে?", "কেমন আছ?".
@@ -168,9 +185,9 @@ INTENT CLASSIFICATION:
 
 SUB-QUERY EXTRACTION:
 
-  For factual_govt, split the message into up to 3 distinct sub-questions
-  and TRANSLATE each to formal, search-optimized Bengali. Follow these
-  rules strictly:
+  For factual_govt, factual_wiki, and factual_mixed, split the message
+  into up to 3 distinct sub-questions and TRANSLATE each to formal,
+  search-optimized Bengali. Follow these rules strictly:
 
   1. REPLACE colloquial or English loanwords with standard Bengali
      government-service terms:
@@ -237,7 +254,7 @@ class RouterResult:
     usage: Optional[Dict[str, int]] = None
 
     def is_factual(self) -> bool:
-        return self.intent == "factual_govt"
+        return self.intent in ("factual_govt", "factual_wiki", "factual_mixed")
 
 
 def _extract_usage(resp: Any) -> Optional[Dict[str, int]]:
@@ -394,7 +411,7 @@ async def route(
         data = json.loads(raw)
 
         candidate_intent = str(data.get("intent", "")).lower().strip()
-        if candidate_intent in ("factual_govt", "chitchat", "political_refuse"):
+        if candidate_intent in ("factual_govt", "factual_wiki", "factual_mixed", "chitchat", "political_refuse"):
             intent = candidate_intent  # type: ignore[assignment]
         else:
             notes.append(f"unknown_intent={candidate_intent!r}; default factual_govt")
@@ -409,7 +426,7 @@ async def route(
                     s = unicodedata.normalize("NFC", s).strip()
                     if s:
                         cleaned.append(s)
-            if intent == "factual_govt":
+            if intent in ("factual_govt", "factual_wiki", "factual_mixed"):
                 sub_queries = cleaned if cleaned else [text]
             else:
                 sub_queries = []
@@ -423,7 +440,9 @@ async def route(
         notes.append(f"router_error: {e!s}")
 
     # 4. Domain-vocab override — never override AWAY from factual_govt.
-    if intent != "factual_govt" and _DOMAIN_RE.search(text):
+    # Govt-service vocabulary always takes priority; wiki/mixed can be
+    # overridden to govt when domain terms are present.
+    if intent not in ("factual_govt", "factual_mixed") and _DOMAIN_RE.search(text):
         notes.append(f"domain_override: {intent}→factual_govt")
         intent = "factual_govt"
         if not sub_queries:
@@ -436,7 +455,7 @@ async def route(
 
     return RouterResult(
         intent=intent,
-        sub_queries_bengali=sub_queries if intent == "factual_govt" else [],
+        sub_queries_bengali=sub_queries if intent in ("factual_govt", "factual_wiki", "factual_mixed") else [],
         raw_query=text,
         notes=notes,
         usage=usage,

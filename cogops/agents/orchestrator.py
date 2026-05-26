@@ -277,7 +277,14 @@ class Orchestrator:
                     self._persist(user_id, turn_id, original_query, self.chitchat_greeting)
                 return
 
-            # ----- Stage 4c: factual_govt — run the deterministic pipeline -----
+            # ----- Stage 4c: factual intents — run the deterministic pipeline -----
+            # Set chunk_type filter based on router intent for unified corpus.
+            if router_result.intent == "factual_govt":
+                self.pipeline_cfg.chunk_type = "govt_service"
+            elif router_result.intent == "factual_wiki":
+                self.pipeline_cfg.chunk_type = "wiki"
+            elif router_result.intent == "factual_mixed":
+                self.pipeline_cfg.chunk_type = None
             final_text_for_persist: Optional[str] = None
             try:
                 async for event in run_factual_pipeline(
