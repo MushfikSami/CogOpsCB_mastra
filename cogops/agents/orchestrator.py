@@ -37,6 +37,7 @@ import yaml
 from cogops.agents.pipeline import PipelineConfig, run_factual_pipeline
 from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
+from cogops.pipeline.context_resolve import resolve_references
 from cogops.pipeline.router import route as router_route
 from cogops.pipeline.sanitize import INPUT_INVALID_REFUSAL_BN, sanitize
 from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
@@ -148,12 +149,10 @@ class Orchestrator:
         return PipelineConfig(
             jiggasha_endpoint=endpoint,
             jiggasha_timeout=float(jcfg.get("timeout_seconds", 45.0)),
-            jiggasha_rerank=bool(jcfg.get("rerank", True)),
-            top_k_per_sub=int(jcfg.get("top_k_per_sub", jcfg.get("top_k", 20))),
-            candidate_cap_global=int(jcfg.get("candidate_cap_global", 30)),
-            keep_cap=int(jcfg.get("keep_cap", 24)),
-            weak_per_sub_cap=int(jcfg.get("weak_per_sub_cap", 3)),
-            fallback_cosine_min=float(jcfg.get("fallback_cosine_min", 0.50)),
+            top_k_fetch=int(jcfg.get("top_k_fetch", jcfg.get("top_k", 50))),
+            use_instruction=bool(jcfg.get("use_instruction", True)),
+            cosine_threshold=jcfg.get("cosine_threshold"),
+            token_budget=jcfg.get("token_budget"),
             composer_temperature=float(pcfg.get("composer", {}).get("temperature", 0.3)),
             composer_top_p=float(pcfg.get("composer", {}).get("top_p", 0.95)),
             composer_max_tokens=int(pcfg.get("composer", {}).get("max_tokens", 2048)),
@@ -214,10 +213,23 @@ class Orchestrator:
                    ],
                    "turn_id": turn_id}
 
+            # ----- Stage 0.5: Context resolution (pronouns / references) -----
+            resolved_query = await resolve_references(
+                query=clean_query,
+                history=history_messages,
+                secondary_client=self.secondary_service.client_llm,
+                secondary_model=self.secondary_service.model,
+                timeout=3.0,
+            )
+            if resolved_query != clean_query:
+                yield {"type": "context_resolved", "channel": "debug",
+                       "original": clean_query, "resolved": resolved_query,
+                       "turn_id": turn_id}
+
             # ----- Stage 1: Router -----
             try:
                 router_result = await router_route(
-                    query=clean_query,
+                    query=resolved_query,
                     secondary_client=self.secondary_service.client_llm,
                     secondary_model=self.secondary_service.model,
                     timeout=5.0,
@@ -228,7 +240,7 @@ class Orchestrator:
                 router_result = RouterResult(
                     intent="factual_govt",
                     sub_queries_bengali=[clean_query],
-                    raw_query=clean_query,
+                    raw_query=resolved_query,
                     notes=[f"router_exception: {e!s}"],
                 )
             yield {"type": "router_done", "channel": "debug",
@@ -278,13 +290,10 @@ class Orchestrator:
                 return
 
             # ----- Stage 4c: factual intents — run the deterministic pipeline -----
-            # Set chunk_type filter based on router intent for unified corpus.
-            if router_result.intent == "factual_govt":
-                self.pipeline_cfg.chunk_type = "govt_service"
-            elif router_result.intent == "factual_wiki":
-                self.pipeline_cfg.chunk_type = "wiki"
-            elif router_result.intent == "factual_mixed":
-                self.pipeline_cfg.chunk_type = None
+            # Always search the entire unified corpus (wiki + govt_service).
+            # The instruction-based retrieval + threshold filter handles cross-corpus
+            # relevance without needing intent-based chunk_type filtering.
+            self.pipeline_cfg.chunk_type = None
             final_text_for_persist: Optional[str] = None
             try:
                 async for event in run_factual_pipeline(

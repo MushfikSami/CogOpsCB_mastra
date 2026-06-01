@@ -684,8 +684,8 @@ class TestConfig:
         cfg = load_config()
         assert "tools" in cfg
         assert "jiggasha" in cfg["tools"]["enabled"]
-        # Reranker is gone; the per-sub top_k surfaces the retrieval cap.
-        assert cfg["tools"]["jiggasha"]["top_k_per_sub"] >= 10
+        # Instruction-based retrieval cap.
+        assert cfg["tools"]["jiggasha"]["top_k_fetch"] >= 10
 
     def test_retrieval_refusal_text_present(self):
         from cogops.config.loader import load_config
@@ -744,12 +744,11 @@ class TestConfig:
         assert "disambiguation" in cfg["pipeline"]
         assert "min_distinct_services" in cfg["pipeline"]["disambiguation"]
 
-        # Rerank knobs now live on Jiggasha (one HTTP call returns vetted
-        # passages). Confirm the chatbot side forwards them.
+        # Instruction-based retrieval knobs on Jiggasha.
         jcfg = cfg.get("tools", {}).get("jiggasha", {})
-        assert jcfg.get("rerank") is True
-        assert "keep_cap" in jcfg
-        assert "weak_per_sub_cap" in jcfg
+        assert jcfg.get("use_instruction") is True
+        assert "cosine_threshold" in jcfg
+        assert "token_budget" in jcfg
 
 # ---------------------------------------------------------------------------
 # Messages (fallback strings)

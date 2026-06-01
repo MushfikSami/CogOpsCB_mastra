@@ -3,16 +3,15 @@ tests/test_pipeline.py
 
 Integration tests for the deterministic pipeline (cogops/agents/pipeline.py).
 
-The pipeline now makes ONE Jiggasha POST that returns LLM-reranked passages.
 We mock:
-  - Jiggasha HTTP via httpx.MockTransport (returns the new multi-query shape)
-  - secondary LLM (NLI verifier ONLY now) via AsyncMock
+  - Jiggasha HTTP via httpx.MockTransport (returns instruction-based shape)
+  - secondary LLM (NLI verifier ONLY) via AsyncMock
   - primary LLM (composer streaming) via a custom async-iterable mock
 
 These tests verify the WIRING — events flow correctly, refusals fire at the
 right stages, disambiguation fires under the right conditions, and the
-source_map/citations/Sources-block plumbing holds. Semantic quality of the
-rerank and composer is exercised by spot-checks on the live stack.
+source_map/citations/Sources-block plumbing holds. Semantic quality of
+retrieval and composer is exercised by spot-checks on the live stack.
 """
 
 from __future__ import annotations
@@ -34,9 +33,9 @@ from cogops.pipeline.router import RouterResult
 # Test fixtures / mock helpers
 # ============================================================
 
-def _factual_router(subs: List[str], raw: Optional[str] = None) -> RouterResult:
+def _factual_router(subs: List[str], raw: Optional[str] = None, intent: str = "factual_govt") -> RouterResult:
     return RouterResult(
-        intent="factual_govt",
+        intent=intent,
         sub_queries_bengali=subs,
         raw_query=raw or " / ".join(subs),
     )
@@ -54,12 +53,8 @@ def _passage(pid: int, score: float, text: str, **kw) -> Dict[str, Any]:
     }
 
 
-def _jiggasha_transport(
-    passages: List[Dict[str, Any]],
-    rerank: Dict[str, List[List[int]]],
-    degraded: bool = False,
-):
-    """Mock /search transport. Returns the new multi-query shape.
+def _jiggasha_transport(passages: List[Dict[str, Any]]):
+    """Mock /search transport. Returns the instruction-based multi-query shape.
 
     The single canned response is returned for any sub_queries payload.
     """
@@ -75,15 +70,14 @@ def _jiggasha_transport(
         return httpx.Response(200, json={
             "sub_queries": subs,
             "passages": passages,
-            "rerank": rerank,
-            "degraded": degraded,
+            "instruction": "Retrieve passages...",
+            "elapsed_ms": 123,
         })
     return httpx.MockTransport(handler)
 
 
 def _mock_secondary_nli(nli_json: str = '{"verdicts":[]}'):
-    """Secondary client now only handles NLI verifier calls (rerank moved to
-    Jiggasha). Returns whatever NLI JSON the caller specifies."""
+    """Secondary client handles NLI verifier calls only."""
     async def create(**kwargs):
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=nli_json))],
@@ -130,8 +124,7 @@ class TestHappyPath(unittest.TestCase):
             _passage(41, 0.82, "এনআইডি হারিয়ে গেলে থানায় জিডি করুন।", category="NID"),
             _passage(47, 0.79, "স্লিপ হারালে দ্বিতীয়বার আবেদন।", category="NID"),
         ]
-        rerank = {"1": [[41, 0], [47, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
 
         nli = json.dumps({"verdicts": [{"i": 0, "v": "entailed"}]})
         secondary = _mock_secondary_nli(nli)
@@ -180,9 +173,8 @@ class TestHappyPath(unittest.TestCase):
 
 class TestRefusalPaths(unittest.TestCase):
     def test_empty_jiggasha_emits_refusal_no_llm(self):
-        http = httpx.AsyncClient(transport=_jiggasha_transport([], {"1": []}))
-        # Secondary LLM may be called for query expansion (fast-path misses on
-        # "x?"), but must NOT be called for NLI verification or composer.
+        http = httpx.AsyncClient(transport=_jiggasha_transport([]))
+        # Secondary and primary LLMs must NOT be called.
         secondary = _mock_secondary_nli()
         primary_create = AsyncMock(side_effect=AssertionError("primary must not be called"))
         primary = SimpleNamespace(
@@ -216,7 +208,6 @@ class TestRefusalPaths(unittest.TestCase):
         primary = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=primary_create)),
         )
-        # Secondary LLM may be called for query expansion before Jiggasha.
         secondary = _mock_secondary_nli()
 
         events = asyncio.run(_drain(run_factual_pipeline(
@@ -237,8 +228,7 @@ class TestRefusalPaths(unittest.TestCase):
 
     def test_composer_with_no_real_citations_falls_back_to_refusal(self):
         passages = [_passage(5, 0.82, "real passage text", topic="real")]
-        rerank = {"1": [[5, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["just some prose with [S99] only."])
 
@@ -273,11 +263,7 @@ class TestMultiQuestion(unittest.TestCase):
             _passage(20, 0.65, "shared passage", category="অন্য"),
             _passage(30, 0.55, "nid-correct passage", category="NID"),
         ]
-        rerank = {
-            "1": [[10, 0], [20, 0]],
-            "2": [[20, 0], [30, 0]],
-        }
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream([
             "ফি ৪০২৫ [S1]। সংশোধন কেন্দ্রে [S3]।",
@@ -307,11 +293,10 @@ class TestMultiQuestion(unittest.TestCase):
         self.assertIn("[S1]", final["content"])
         self.assertIn("[S3]", final["content"])
 
-    def test_source_map_records_sub_indices_from_rerank(self):
-        """A passage that's yes for both subs gets sub_indices=[0,1]."""
+    def test_source_map_has_all_passages(self):
+        """Every passage returned by Jiggasha becomes a source map entry."""
         passages = [_passage(99, 0.70, "shared", category="X")]
-        rerank = {"1": [[99, 0]], "2": [[99, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["answer [S1]।"])
 
@@ -329,10 +314,9 @@ class TestMultiQuestion(unittest.TestCase):
         asyncio.run(http.aclose())
 
         final = next(e for e in events if e["type"] == "final_answer")
-        # source_map should record sub_indices=[0,1] for S1.
         meta = final["source_map"]["S1"]
-        self.assertEqual(meta["sub_indices"], [0, 1])
         self.assertEqual(meta["verdict"], "yes")
+        self.assertIn("passage_id", meta)
 
 
 # ============================================================
@@ -342,8 +326,7 @@ class TestMultiQuestion(unittest.TestCase):
 class TestComposerEmpty(unittest.TestCase):
     def test_composer_empty_emits_refusal(self):
         passages = [_passage(5, 0.82, "real text", category="X")]
-        rerank = {"1": [[5, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["", "", ""])  # all empty
 
@@ -372,8 +355,7 @@ class TestChannelDiscipline(unittest.TestCase):
 
     def test_only_answer_events_are_visible(self):
         passages = [_passage(5, 0.82, "real text", category="X")]
-        rerank = {"1": [[5, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["answer [S1]।"])
 
@@ -411,8 +393,7 @@ class TestDisambiguation(unittest.TestCase):
             _passage(103, 0.75, "বিবাহ সনদ কাজী অফিস...",
                      category="সনদ", sub_category="বিবাহ সনদ", service="বিবাহ সনদ"),
         ]
-        rerank = {"1": [[101, 0], [102, 0], [103, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["কোনটি জানতে চান? [S1] [S2] [S3]"])
 
@@ -448,8 +429,7 @@ class TestDisambiguation(unittest.TestCase):
                      category="শিক্ষা", sub_category="কুমিল্লা বোর্ড নাম সংশোধন",
                      service="কুমিল্লা বোর্ড নাম সংশোধন"),
         ]
-        rerank = {"1": [[201, 0], [202, 0], [203, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["কোন বোর্ড? [S1] [S2] [S3]"])
 
@@ -486,8 +466,7 @@ class TestDisambiguation(unittest.TestCase):
             _passage(302, 0.78, "চারিত্রিক সনদ পুলিশ",
                      category="সনদ", sub_category="চারিত্রিক সনদ", service="চারিত্রিক সনদ"),
         ]
-        rerank = {"1": [[301, 0], [302, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["specific answer [S1]।"])
 
@@ -521,8 +500,7 @@ class TestDisambiguation(unittest.TestCase):
             _passage(402, 0.78, "এনআইডি সংশোধন", category="NID",
                      sub_category="সংশোধন", service="NID সংশোধন"),
         ]
-        rerank = {"1": [[401, 0]], "2": [[402, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["sub1 [S1]।\n\nsub2 [S2]।"])
 
@@ -552,8 +530,7 @@ class TestDisambiguation(unittest.TestCase):
             _passage(502, 0.78, "এনআইডি ডাউনলোড",
                      category="NID", sub_category="স্ট্যাটাস", service="NID স্ট্যাটাস"),
         ]
-        rerank = {"1": [[501, 0], [502, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["এনআইডি যেভাবে... [S1]।"])
 
@@ -572,7 +549,7 @@ class TestDisambiguation(unittest.TestCase):
 
         self.assertFalse(
             any(e["type"] == "disambiguate_required" for e in events),
-            "disambiguate must not fire when only one (cat, sub_cat) tuple is in the yes-set",
+            "disambiguate must not fire when only one (cat, sub_cat) tuple is present",
         )
 
     def test_same_sub_category_with_aspect_variations_does_not_disambiguate(self):
@@ -591,8 +568,7 @@ class TestDisambiguation(unittest.TestCase):
                      category="জরুরি প্রত্যয়ন ও সনদ", sub_category="জরুরি প্রত্যয়ন",
                      service="চারিত্রিক সনদ: সময়সীমা"),
         ]
-        rerank = {"1": [[601, 0], [602, 0], [603, 0]]}
-        http = httpx.AsyncClient(transport=_jiggasha_transport(passages, rerank))
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
         secondary = _mock_secondary_nli()
         primary = _mock_primary_stream(["চারিত্রিক সনদ: ... [S1] [S2] [S3]।"])
 

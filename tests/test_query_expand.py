@@ -12,20 +12,23 @@ from cogops.pipeline.query_expand import (
 
 
 class TestExpandSubQuery(unittest.TestCase):
-    def test_marriage_certificate_expansion(self):
+    def test_passthrough_no_hardcoded_map(self):
+        """expand_sub_query is a pure passthrough — formalization is LLM-only."""
         q = "বিয়ের সার্টিফিকেটে নাম পরিবর্তন"
         out = expand_sub_query(q)
-        self.assertIn("বিবাহ সনদ", out)
-        self.assertIn("বিবাহিত প্রত্যয়ন", out)
-        self.assertTrue(out.startswith(q))
+        self.assertEqual(out, q)
 
-    def test_nid_expansion(self):
+    def test_passthrough_nid(self):
         q = "এনআইডি কার্ড হারিয়ে গেলে কী করব?"
         out = expand_sub_query(q)
-        self.assertIn("জাতীয় পরিচয়পত্র", out)
-        self.assertIn("স্মার্ট কার্ড", out)
+        self.assertEqual(out, q)
 
-    def test_no_expansion_when_no_doc_type(self):
+    def test_passthrough_passport(self):
+        q = "পাসপোর্ট করার নিয়ম কি?"
+        out = expand_sub_query(q)
+        self.assertEqual(out, q)
+
+    def test_passthrough_no_doc_type(self):
         q = "সরকারি চাকরির আবেদন কীভাবে করব?"
         out = expand_sub_query(q)
         self.assertEqual(out, q)
@@ -33,8 +36,31 @@ class TestExpandSubQuery(unittest.TestCase):
     def test_passthrough_already_formal(self):
         q = "বিবাহ সনদে নাম সংশোধন"
         out = expand_sub_query(q)
-        # Should not duplicate terms already present
-        self.assertEqual(out.count("বিবাহ সনদ"), 1)
+        self.assertEqual(out, q)
+
+    def test_passthrough_metro(self):
+        q = "মেট্রোরেলের ভাড়া কত?"
+        out = expand_sub_query(q)
+        self.assertEqual(out, q)
+
+    def test_passthrough_utility_gas(self):
+        q = "গ্যাস সংযোগ নিতে চাই"
+        out = expand_sub_query(q)
+        self.assertEqual(out, q)
+
+    def test_passthrough_utility_wasa(self):
+        q = "ওয়াসার বিল কত?"
+        out = expand_sub_query(q)
+        self.assertEqual(out, q)
+
+    def test_empty_query(self):
+        out = expand_sub_query("")
+        self.assertEqual(out, "")
+
+    def test_passthrough_generic_question(self):
+        q = "বাংলাদেশের প্রধানমন্ত্রী কে?"
+        out = expand_sub_query(q)
+        self.assertEqual(out, q)
 
 
 class TestExtractDocumentType(unittest.TestCase):
@@ -49,9 +75,11 @@ class TestExtractDocumentType(unittest.TestCase):
 
     def test_passport(self):
         self.assertEqual(extract_document_type("পাসপোর্ট"), "পাসপোর্ট")
+        self.assertEqual(extract_document_type("ই-পাসপোর্ট"), "পাসপোর্ট")
 
     def test_no_doc_type(self):
         self.assertIsNone(extract_document_type("সরকারি চাকরির আবেদন"))
+        self.assertIsNone(extract_document_type(""))
 
 
 class TestCheckDocumentTypeMatch(unittest.TestCase):

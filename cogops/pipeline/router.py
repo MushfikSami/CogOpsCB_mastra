@@ -196,8 +196,14 @@ SUB-QUERY EXTRACTION:
      • টিকেট → টিকিট
   2. REMOVE conversational fillers such as আচ্ছা, ভাই, দেখেন, শুনুন,
      বলুন তো, একটু, কিন্তু, তাই, তাহলে.
-  3. Write CONCISE sub-queries suitable for embedding retrieval — avoid
-     long story-like framing.
+  3. Write CONCISE, FORMAL sub-queries suitable for embedding retrieval.
+     Use official government-service vocabulary.  Transform informal
+     phrasing into formal search terms:
+       informal : "পাসপোর্ট করার নিয়ম কি?"
+       formal   : "বাংলাদেশ পাসপোর্ট আবেদন প্রক্রিয়া নিয়ম"
+       informal : "এনআইডি কার্ড হারিয়ে গেলে কী করব?"
+       formal   : "এনআইডি হারিয়ে গেলে করণীয় প্রক্রিয়া"
+     Avoid long story-like framing.
   4. If the user mentions a specific document, certificate, or service
      type (e.g., বিবাহ সনদ, জন্ম সনদ, এনআইডি, পাসপোর্ট, এসএসসি সনদ),
      you MUST include that exact document type in the sub-query. Do NOT

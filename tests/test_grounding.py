@@ -194,52 +194,6 @@ def _mock_secondary_returning(intent_str: str):
     return client
 
 
-class TestIntentClassifier:
-    def test_chitchat_passthrough(self):
-        from cogops.verifier.intent import classify_intent
-        client = _mock_secondary_returning("chitchat")
-        result = asyncio.run(classify_intent("হ্যালো", client, "model"))
-        assert result == "chitchat"
-
-    def test_factual_passthrough(self):
-        from cogops.verifier.intent import classify_intent
-        client = _mock_secondary_returning("factual")
-        result = asyncio.run(classify_intent("কিছু একটা প্রশ্ন", client, "model"))
-        assert result == "factual"
-
-    def test_political_keyword_short_circuits_to_refuse(self):
-        from cogops.verifier.intent import classify_intent
-        client = _mock_secondary_returning("chitchat")  # classifier output ignored
-        # Must hit the refuse keyword shortcut before any LLM call.
-        result = asyncio.run(classify_intent("আওয়ামী লীগ না বিএনপি?", client, "model"))
-        assert result == "refuse"
-        client.chat.completions.create.assert_not_called()
-
-    def test_domain_vocab_override_factual(self):
-        from cogops.verifier.intent import classify_intent
-        # Classifier says chitchat, but message contains "পাসপোর্ট" →
-        # belt-and-braces override should force "factual".
-        client = _mock_secondary_returning("chitchat")
-        result = asyncio.run(classify_intent(
-            "পাসপোর্ট সম্পর্কে কিছু বলো", client, "model",
-        ))
-        assert result == "factual"
-
-    def test_llm_error_defaults_to_factual(self):
-        from cogops.verifier.intent import classify_intent
-        client = MagicMock()
-        client.chat.completions.create = AsyncMock(side_effect=RuntimeError("LLM down"))
-        result = asyncio.run(classify_intent("কিছু একটা", client, "model"))
-        assert result == "factual"
-
-    def test_empty_text_yields_chitchat(self):
-        from cogops.verifier.intent import classify_intent
-        client = _mock_secondary_returning("factual")
-        result = asyncio.run(classify_intent("", client, "model"))
-        assert result == "chitchat"
-        client.chat.completions.create.assert_not_called()
-
-
 # =============================================================================
 # NLI verifier (batched, fail-soft)
 # =============================================================================

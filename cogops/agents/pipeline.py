@@ -5,20 +5,19 @@ Deterministic factual-query pipeline. Stages:
 
     Stage 0  sanitize                  (pure code, no LLM)             — caller
     Stage 1  router                     (1 secondary-LLM call)          — caller
-    Stage 2  Jiggasha multi-query rerank (1 HTTP POST, server-side LLM) — here
-    Stage 3  compose                    (1 primary-LLM streaming call)  — here
-    Stage 4  post-flight                (NLI verify + Sources block)    — here
+    Stage 2  Jiggasha retrieval         (1 HTTP POST, instruction-based) — here
+    Stage 3  compose                    (1 primary-LLM streaming call)   — here
+    Stage 4  post-flight                (NLI verify + Sources block)     — here
 
-Stage 2 collapses what used to be the chatbot-side "parallel retrieve +
-LLM rerank" into a single POST to Jiggasha (`{sub_queries, rerank: true}`).
-Jiggasha returns:
+Stage 2 POSTs sub-queries to Jiggasha, which prefixes a dynamic English
+instruction, embeds the query, fetches top-K from Qdrant, and filters by
+cosine threshold + token budget.  Jiggasha returns:
     {
       sub_queries: [...],
       passages: [{passage_id, text, category, ..., score}, ...],
-      rerank: {"1": [[pid, cls], ...], "2": [...]},
-      degraded: false
+      instruction: "...",
+      elapsed_ms: 123
     }
-where `cls` is 0=yes (directly answers) or 1=weak (tangential backfill).
 
 This module is intentionally framework-light: depends only on
   - cogops.pipeline.router (RouterResult)
@@ -40,10 +39,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from cogops.pipeline.normalize import normalize_sub_queries
-from cogops.pipeline.query_expand import (
-    check_document_type_match,
-    expand_sub_queries_llm,
-)
+from cogops.pipeline.query_expand import check_document_type_match
 from cogops.pipeline.router import RouterResult
 from cogops.prompts.composer import get_composer_prompt
 from cogops.prompts.time_reminder import build_time_reminder
@@ -68,16 +64,16 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     """Tunables for the factual pipeline."""
 
-    # Jiggasha (multi-query rerank path)
+    # Jiggasha retrieval
     jiggasha_endpoint: str = "http://localhost:10000/search"
     jiggasha_timeout: float = 45.0
-    jiggasha_rerank: bool = True
-    top_k_per_sub: int = 20
-    candidate_cap_global: int = 30
-    keep_cap: int = 24
-    weak_per_sub_cap: int = 3
-    fallback_cosine_min: float = 0.50
+    top_k_fetch: int = 50
     chunk_type: Optional[str] = None   # "govt_service" | "wiki" | null
+
+    # Instruction-based retrieval
+    use_instruction: bool = True
+    cosine_threshold: Optional[float] = None
+    token_budget: Optional[int] = None
 
     # Composer
     composer_temperature: float = 0.1
@@ -92,7 +88,7 @@ class PipelineConfig:
 
     # Disambiguation
     disambig_min_distinct_services: int = 2
-    disambig_short_query_token_cap: int = 6
+    disambig_short_query_token_cap: int = 8
     disambig_candidate_cap: int = 6   # max candidates shown to the user
 
     # Refusals
@@ -110,7 +106,7 @@ def _evt(type_: str, channel: str = "debug", **payload: Any) -> Dict[str, Any]:
 
 
 # ============================================================
-# Stage 2 — Single Jiggasha call (server-side LLM rerank)
+# Stage 2 — Single Jiggasha call (instruction-based retrieval)
 # ============================================================
 
 async def _call_jiggasha(
@@ -119,22 +115,19 @@ async def _call_jiggasha(
     sub_queries: List[str],
     cfg: PipelineConfig,
 ) -> Dict[str, Any]:
-    """POST one /search with the multi-query rerank shape.
+    """POST one /search to Jiggasha.
 
-    Retries on transient 5xx / network errors. Jiggasha applies its own
-    concurrency cap; under load it may briefly 503 before the semaphore
-    drains. Two retries with exponential backoff are enough to mask that.
-    Raises on the final failure.
+    Retries on transient 5xx / network errors. Two retries with exponential
+    backoff are enough to mask brief overload signals. Raises on the final
+    failure.
     """
     payload = {
         "sub_queries": sub_queries,
-        "top_k_per_sub": cfg.top_k_per_sub,
-        "rerank": cfg.jiggasha_rerank,
-        "candidate_cap_global": cfg.candidate_cap_global,
-        "keep_cap": cfg.keep_cap,
-        "weak_per_sub_cap": cfg.weak_per_sub_cap,
-        "fallback_cosine_min": cfg.fallback_cosine_min,
+        "top_k_per_sub": cfg.top_k_fetch,
         "chunk_type": cfg.chunk_type,
+        "use_instruction": cfg.use_instruction,
+        "cosine_threshold": cfg.cosine_threshold,
+        "token_budget": cfg.token_budget,
     }
     last_exc: Optional[Exception] = None
     for attempt in range(3):
@@ -158,37 +151,14 @@ async def _call_jiggasha(
     raise RuntimeError("jiggasha call failed without exception")
 
 
-def _allocate_source_map_from_rerank(
+def _build_source_map_from_passages(
     passages: List[Dict[str, Any]],
-    rerank: Dict[str, List[List[int]]],
-    sub_queries: List[str],
 ) -> Dict[str, Dict[str, Any]]:
-    """Build the `[S#] → passage meta` map preserving Jiggasha's order.
+    """Build the `[S#] → passage meta` map from Jiggasha's passages.
 
-    For each passage the per-sub `verdict_by_sub` records which sub-questions
-    flagged it `yes` (0) or `weak` (1). The aggregate `verdict` is `yes` if
-    ANY sub voted yes, else `weak`. `sub_indices` is the union of sub indices
-    that voted for it (0-based).
+    All passages returned by Jiggasha have already passed cosine threshold
+    and token budget filters, so every passage is tagged `verdict: "yes"`.
     """
-    # Invert rerank: pid -> {sub_idx: cls}
-    pid_to_subs: Dict[int, Dict[int, int]] = {}
-    for sub_key, entries in (rerank or {}).items():
-        try:
-            sub_idx = int(sub_key) - 1
-        except (TypeError, ValueError):
-            continue
-        if sub_idx < 0:
-            continue
-        for entry in entries or []:
-            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-                continue
-            try:
-                pid = int(entry[0])
-                cls = int(entry[1])
-            except (TypeError, ValueError):
-                continue
-            pid_to_subs.setdefault(pid, {})[sub_idx] = cls
-
     source_map: Dict[str, Dict[str, Any]] = {}
     for i, p in enumerate(passages, start=1):
         try:
@@ -197,16 +167,6 @@ def _allocate_source_map_from_rerank(
             continue
         if pid <= 0:
             continue
-        verdict_by_sub = pid_to_subs.get(pid, {})
-        if any(v == 0 for v in verdict_by_sub.values()):
-            verdict = "yes"
-        elif verdict_by_sub:
-            verdict = "weak"
-        else:
-            # In a well-behaved response every kept passage carries a verdict
-            # for at least one sub; if Jiggasha skipped one, treat as weak.
-            verdict = "weak"
-        sub_indices = sorted(verdict_by_sub.keys())
         tag = f"S{i}"
         source_map[tag] = {
             "passage_id": pid,
@@ -217,12 +177,7 @@ def _allocate_source_map_from_rerank(
             "topic": p.get("topic", "") or "",
             "chunk_type": p.get("chunk_type", "") or "",
             "score": float(p.get("score", 0.0)),
-            "verdict": verdict,
-            "verdict_by_sub": dict(verdict_by_sub),
-            "sub_indices": sub_indices,
-            "sub_queries": [
-                sub_queries[j] for j in sub_indices if 0 <= j < len(sub_queries)
-            ],
+            "verdict": "yes",
             "tool": "jiggasha",
         }
     return source_map
@@ -278,10 +233,6 @@ def _detect_disambiguation(
     Skip disambiguation for factual_wiki / factual_mixed intents:
     wiki corpus naturally spans many distinct (category, sub_category)
     pairs, so disambiguation is not meaningful for encyclopedia queries.
-    """
-    if intent in ("factual_wiki", "factual_mixed"):
-        return False, []
-    """Decide whether the answer should ask for clarification.
 
     Triggers when:
       - the question has a SINGLE sub-question (multi-sub queries are already
@@ -289,42 +240,26 @@ def _detect_disambiguation(
       - the normalized intent (sub_queries[0], or raw_query as fallback) is
         short — gauged in tokens, not characters; and
       - ≥ cfg.disambig_min_distinct_services distinct (category, sub_category)
-        tuples appear among yes-or-weak kept passages.
+        tuples appear among kept passages.
 
-    Weak counts here because for short/generic queries the LLM reranker often
-    returns few yes verdicts but many weak ones spanning services — exactly
-    when disambiguation matters most. The distinct key is (category,
-    sub_category) and deliberately NOT `service`: the corpus's `service`
-    field encodes per-aspect labels (e.g. "চারিত্রিক সনদ: ভাষা" vs
-    "চারিত্রিক সনদ: সেবারমূল্য") which all describe the same actual service.
-    For the "same sub_category, different boards" case (e.g. SSC name
-    correction across Dhaka/Chittagong boards), the corpus already encodes
-    each board in its own sub_category, so (cat, sub_cat) is sufficient.
+    The distinct key is (category, sub_category) and deliberately NOT
+    `service`: the corpus's `service` field encodes per-aspect labels
+    (e.g. "চারিত্রিক সনদ: ভাষা" vs "চারিত্রিক সনদ: সেবারমূল্য") which all
+    describe the same actual service.  For the "same sub_category, different
+    boards" case (e.g. SSC name correction across Dhaka/Chittagong boards),
+    the corpus already encodes each board in its own sub_category, so
+    (cat, sub_cat) is sufficient.
 
     Returns (disambiguate, candidates) where candidates is a list of
     (tag, human-readable service name) — one per distinct (cat, sub_cat).
-    Yes-verdict tags are preferred over weak when both exist for the same key.
     """
+    if intent in ("factual_wiki", "factual_mixed"):
+        return False, []
+
     if not _intent_is_short(sub_queries, raw_query, cfg.disambig_short_query_token_cap):
         return False, []
 
-    # If at least one passage earned a "yes" verdict, we only consider
-    # yes-verdict passages for disambiguation.  A single strong match
-    # (e.g. exact topic) should not be diluted by weak also-rans from
-    # unrelated sub-categories.  When there are no yes verdicts we fall
-    # back to weak ones — that preserves disambiguation for short/generic
-    # queries where the reranker is stingy with yes votes.
-    yes_entries = [
-        (tag, meta) for tag, meta in source_map.items()
-        if meta.get("verdict") == "yes"
-    ]
-    if yes_entries:
-        candidate_entries = yes_entries
-    else:
-        candidate_entries = [
-            (tag, meta) for tag, meta in source_map.items()
-            if meta.get("verdict") == "weak"
-        ]
+    candidate_entries = list(source_map.items())
     if not candidate_entries:
         return False, []
 
@@ -334,12 +269,9 @@ def _detect_disambiguation(
             meta.get("category", "") or "",
             meta.get("sub_category", "") or "",
         )
-        verdict = meta.get("verdict") or "weak"
         score = float(meta.get("score", 0.0))
         existing = distinct.get(key)
-        if existing is not None and existing[2] == "yes":
-            continue
-        if existing is not None and verdict != "yes":
+        if existing is not None:
             continue
         label_parts: List[str] = []
         for k in ("service", "sub_category", "category"):
@@ -347,21 +279,21 @@ def _detect_disambiguation(
             if v:
                 label_parts.append(v)
         label = " — ".join(label_parts) if label_parts else "(unspecified)"
-        distinct[key] = (tag, label, verdict, score)
+        distinct[key] = (tag, label, score)
 
     if len(distinct) < cfg.disambig_min_distinct_services:
         return False, []
 
-    # Sort by (yes-first, cosine desc) and cap the candidate count so the
-    # user isn't drowned in a 15-item list for ultra-generic queries.
+    # Sort by cosine desc and cap the candidate count so the user isn't
+    # drowned in a 15-item list for ultra-generic queries.
     ordered = sorted(
         distinct.values(),
-        key=lambda t: (0 if t[2] == "yes" else 1, -t[3]),
+        key=lambda t: -t[2],
     )
     cap = max(cfg.disambig_min_distinct_services, cfg.disambig_candidate_cap)
     ordered = ordered[:cap]
 
-    candidates = [(tag, label) for tag, label, _, _ in ordered]
+    candidates = [(tag, label) for tag, label, score in ordered]
     return True, candidates
 
 
@@ -479,13 +411,10 @@ async def run_factual_pipeline(
         "run_factual_pipeline received non-factual intent; route correctly upstream"
     )
     sub_queries = normalize_sub_queries(router_result.sub_queries_bengali or [raw_query])
-    sub_queries = await expand_sub_queries_llm(
-        sub_queries, secondary_client, secondary_model,
-    )
     yield _evt("pipeline_start", n_subs=len(sub_queries))
 
     # ------------------------------------------------------------
-    # Stage 2 — Single Jiggasha POST (embed + Qdrant + LLM rerank)
+    # Stage 2 — Single Jiggasha POST (instruction + embed + Qdrant + threshold)
     # ------------------------------------------------------------
     own_http = http_client is None
     http = http_client or httpx.AsyncClient(timeout=cfg.jiggasha_timeout)
@@ -513,20 +442,15 @@ async def run_factual_pipeline(
             await http.aclose()
 
     passages = jres.get("passages", []) or []
-    rerank = jres.get("rerank", {}) or {}
-    degraded = bool(jres.get("degraded", False))
-    rerank_usage = jres.get("rerank_usage")
-    rerank_elapsed_ms = jres.get("elapsed_ms")
+    instruction = jres.get("instruction")
+    retrieval_elapsed_ms = jres.get("elapsed_ms")
 
     yield _evt(
         "retrieval_done",
         passages=passages,
-        rerank=rerank,
         passages_returned=len(passages),
-        degraded=degraded,
-        per_sub_counts={k: len(v) for k, v in rerank.items()},
-        token_usage=rerank_usage,
-        elapsed_ms=rerank_elapsed_ms,
+        instruction=instruction,
+        elapsed_ms=retrieval_elapsed_ms,
     )
 
     if not passages:
@@ -539,7 +463,7 @@ async def run_factual_pipeline(
         yield _evt("answer_complete", channel="both")
         return
 
-    source_map = _allocate_source_map_from_rerank(passages, rerank, sub_queries)
+    source_map = _build_source_map_from_passages(passages)
     yield _evt(
         "source_map_allocated",
         n_sources=len(source_map),
@@ -785,8 +709,7 @@ def _strip_mode_mix_paragraph(text: str) -> Tuple[str, bool]:
     the (B) bullet header or end of text.
 
     This is a deterministic safety net for the composer's mode-mix bug —
-    the prompt alone does not reliably suppress it at temp 0.1, especially
-    when the rerank has marked multiple adjacent passages as yes.
+    the prompt alone does not reliably suppress it at temp 0.1.
 
     Returns (cleaned_text, stripped_bool).
     """
