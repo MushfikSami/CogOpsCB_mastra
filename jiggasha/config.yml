@@ -1,6 +1,6 @@
 # Jiggasha — Bengali passage retrieval service.
 #
-# /search has two modes (content-driven):
+# POST /search modes:
 #   - Legacy single-query : POST {query, top_k} → raw cosine top-K.
 #   - Multi-query         : POST {sub_queries, use_instruction: true, ...}
 #                           → embed per sub → Qdrant top-K each → merge/dedupe
@@ -22,29 +22,26 @@ qdrant:
   collection: "bnwiki_chunks"
   distance: "Cosine"
   timeout: 30
-  top_k: 20            # default per-call top-K; caller can override per request
+  top_k: 20
 
-# LLM relevance reranker (multi-query path). All knobs are overrideable per
-# request; values here are defaults.
-rerank:
+# Secondary LLM config (used for dynamic instruction generation).
+# The key names are historical; only base_url_env / api_key_env / model_env
+# and timeout_seconds are read by the service.
+secondary_llm:
   base_url_env: "SECONDARY_BASE_URL"
   api_key_env: "SECONDARY_API_KEY"
   model_env: "SECONDARY_MODEL_NAME"
   timeout_seconds: 30
-  keep_cap: 24                 # final passage cap returned to the chatbot
-  weak_per_sub_cap: 3          # max "weak" backfill per uncovered sub
-  candidate_cap_global: 30     # cap on merged candidates fed to the LLM
-  fallback_cosine_min: 0.50    # cosine safety-net threshold on LLM failure
 
-# Instruction-based retrieval (replaces LLM reranker with instruction
-# prefix + cosine threshold + token budget).
+# Instruction-based retrieval: instruction prefix + cosine threshold + token budget.
 retrieval:
   use_instruction: true
   static_instruction: ""              # empty = use dynamic LLM-generated instruction
+  # Fallback instruction used when the dynamic LLM generator fails or times out.
+  fallback_instruction: "Retrieve passages that are directly relevant to answering the user's query. Only include passages that provide factual information needed for the answer."
   cosine_threshold: 0.70
   token_budget: 28000
   top_k_fetch: 50
-  # Dynamic instruction generation (fallback when static_instruction is empty).
   instruction_temperature: 0.2
   instruction_max_tokens: 128
   instruction_timeout_seconds: 5.0

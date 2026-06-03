@@ -139,8 +139,16 @@ _HARD_PERSONAL_LAW_REFUSAL = (
 
 
 _ROUTER_SYSTEM_PROMPT = """\
-You are the router for a Bangladesh government-services chatbot. You will be
-given ONE user message (in Bengali, English, Banglish, or mixed).
+You are the router for a Bangladesh government-services chatbot.
+
+You will be given a RECENT CONVERSATION HISTORY (if any) followed by the
+CURRENT user message (in Bengali, English, Banglish, or mixed).
+
+Use the history to resolve pronouns, ambiguous references, and follow-up
+intent.  For example, if the previous answer discussed the Prime Minister and
+the user now asks "খালেদা জিয়ার সাথে তার সম্পর্ক কি?", the pronoun "তার"
+refers to the Prime Minister — classify as factual and include the resolved
+name in the sub-query.
 
 You must output JSON with two fields and nothing else:
 
@@ -185,9 +193,12 @@ INTENT CLASSIFICATION:
 
 SUB-QUERY EXTRACTION:
 
-  For factual_govt, factual_wiki, and factual_mixed, split the message
-  into up to 3 distinct sub-questions and TRANSLATE each to formal,
+  For factual_govt, factual_wiki, and factual_mixed, split the CURRENT
+  message into up to 3 distinct sub-questions and TRANSLATE each to formal,
   search-optimized Bengali. Follow these rules strictly:
+  - Resolve any pronouns or ambiguous references using the conversation history.
+  - If the current message is a follow-up about a topic from the previous turn,
+    include that topic explicitly in the sub-query.
 
   1. REPLACE colloquial or English loanwords with standard Bengali
      government-service terms:
@@ -337,11 +348,27 @@ def _hard_personal_law_match(text: str) -> bool:
     return False
 
 
+def _format_history_for_router(
+    history: List[Dict[str, str]],
+) -> str:
+    """Render conversation history as raw User/Assistant pairs for the router."""
+    lines: List[str] = []
+    for msg in history:
+        role = msg.get("role", "")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines)
+
+
 async def route(
     query: str,
     secondary_client: Optional[AsyncOpenAI],
     secondary_model: str,
     timeout: float = 5.0,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> RouterResult:
     """Classify intent + split + Bengali-normalize in one call.
 
@@ -351,6 +378,8 @@ async def route(
             the router falls back to the fast-path / regex-only behavior.
         secondary_model: model name for the secondary LLM.
         timeout: hard timeout in seconds for the LLM call.
+        history: recent user/assistant turns (oldest → newest). The router
+            sees the full history to resolve pronouns and follow-ups.
 
     Returns:
         RouterResult.
@@ -399,12 +428,19 @@ async def route(
     usage: Optional[Dict[str, int]] = None
 
     try:
+        history_block = _format_history_for_router(history or [])
+        if history_block:
+            user_content = f"{history_block}\n\nCurrent message: {text}"
+            notes.append("history_included")
+        else:
+            user_content = text
+
         async def _call():
             return await secondary_client.chat.completions.create(
                 model=secondary_model,
                 messages=[
                     {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,

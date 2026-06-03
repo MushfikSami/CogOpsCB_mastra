@@ -74,10 +74,26 @@ EXAMPLE 8:
 Query: চারিত্রিক সনদের জন্য কী কী লাগে?
 Instruction: Retrieve passages about character certificate requirements in Bangladesh. Focus on necessary documents, application steps, and official procedures.
 
-Now write the instruction for the given query.
-Query: {query}
+Now write the instruction for the given query/queries.
+{query_block}
 
 Instruction:"""
+
+
+def _build_query_block(query: str) -> str:
+    """Format the query block for the instruction prompt.
+
+    If *query* is a single query, returns the standard single-query format.
+    If *query* contains multiple queries (semicolon-separated or multi-line),
+    the block makes it clear that multiple topics are being searched.
+    """
+    lines = [line.strip() for line in query.split("\n") if line.strip()]
+    if len(lines) == 1:
+        return f"Query: {lines[0]}"
+    out = ["Queries:"]
+    for i, line in enumerate(lines, start=1):
+        out.append(f"  {i}. {line}")
+    return "\n".join(out)
 
 # Simple bounded cache: query → instruction
 _instruction_cache: Dict[str, str] = {}
@@ -116,16 +132,22 @@ async def generate_instruction(
     t0 = time.time()
     try:
         async def _call():
-            resp = await secondary_client.chat.completions.create(
-                model=secondary_model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Query: {cache_key}\n\nInstruction:"},
+            # Build kwargs safely: extra_body is vLLM-specific and may error
+            # on non-vLLM backends (OpenAI, Gemini, etc.).
+            create_kwargs = {
+                "model": secondary_model,
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT.format(query_block=_build_query_block(cache_key))},
+                    {"role": "user", "content": _build_query_block(cache_key) + "\n\nInstruction:"},
                 ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-            )
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            try:
+                create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            except Exception:  # noqa: BLE001
+                pass
+            resp = await secondary_client.chat.completions.create(**create_kwargs)
             return resp.choices[0].message.content or ""
 
         raw = await asyncio.wait_for(_call(), timeout=timeout)

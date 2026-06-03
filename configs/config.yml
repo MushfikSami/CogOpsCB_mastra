@@ -61,6 +61,7 @@ pipeline:
     # overwhelming "15 choices" answers for ultra-generic queries.
     candidate_cap: 6
 
+
 # --- Retrieval / refusal text ---
 retrieval:
   refusal_text_bn: "দুঃখিত, এই প্রশ্নের জন্য নির্ভরযোগ্য সরকারি তথ্য পাওয়া যায়নি।"

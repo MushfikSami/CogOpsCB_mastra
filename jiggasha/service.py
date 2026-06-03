@@ -117,6 +117,7 @@ def _build_clients() -> None:
     retrieval_defaults = {
         "use_instruction": bool(retcfg.get("use_instruction", False)),
         "static_instruction": (retcfg.get("static_instruction") or "").strip(),
+        "fallback_instruction": (retcfg.get("fallback_instruction") or "").strip(),
         "cosine_threshold": float(retcfg.get("cosine_threshold", 0.70)),
         "token_budget": int(retcfg.get("token_budget", 28000)),
         "top_k_fetch": int(retcfg.get("top_k_fetch", 50)),
@@ -125,12 +126,12 @@ def _build_clients() -> None:
         "instruction_timeout": float(retcfg.get("instruction_timeout_seconds", 5.0)),
     }
 
-    # Secondary LLM config lives under the legacy "rerank" key for backward
-    # compatibility with existing deployments.
-    rcfg = _cfg.get("rerank", {}) or {}
-    secondary_url = _resolve_env(rcfg.get("base_url_env", "SECONDARY_BASE_URL"))
-    secondary_key = _resolve_env(rcfg.get("api_key_env", "SECONDARY_API_KEY"))
-    secondary_model = _resolve_env(rcfg.get("model_env", "SECONDARY_MODEL_NAME"))
+    # Secondary LLM config (used for dynamic instruction generation).
+    # Reads from "secondary_llm" first, falls back to legacy "rerank" key.
+    secondary_cfg = _cfg.get("secondary_llm") or _cfg.get("rerank") or {}
+    secondary_url = _resolve_env(secondary_cfg.get("base_url_env", "SECONDARY_BASE_URL"))
+    secondary_key = _resolve_env(secondary_cfg.get("api_key_env", "SECONDARY_API_KEY"))
+    secondary_model = _resolve_env(secondary_cfg.get("model_env", "SECONDARY_MODEL_NAME"))
 
     if secondary_url and secondary_key:
         try:
@@ -173,7 +174,7 @@ class SearchRequest(BaseModel):
     chunk_type: Optional[str] = None   # "wiki" | "govt_service" | null
 
     # Instruction-based retrieval knobs
-    use_instruction: bool = False
+    use_instruction: Optional[bool] = None   # None = use config default; True/False = override
     cosine_threshold: Optional[float] = None
     token_budget: Optional[int] = None
 
@@ -251,14 +252,20 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
     Priority:
       1. Caller-supplied instruction (req.retrieval_instruction)
       2. Static instruction from config (zero latency, zero failure)
-      3. Dynamic LLM-generated instruction (fallback when static is empty)
+      3. Dynamic LLM-generated instruction (best quality)
+      4. Fallback instruction from config (when LLM fails)
     """
     # 1. Caller-supplied instruction takes highest precedence.
     if req.retrieval_instruction:
         return req.retrieval_instruction.strip()
 
-    # 2. Config / request flag must be set.
-    if not req.use_instruction and not retrieval_defaults.get("use_instruction"):
+    # 2. Determine whether instruction mode is enabled.
+    #    req.use_instruction = True  → force ON
+    #    req.use_instruction = False → force OFF
+    #    req.use_instruction = None  → fall back to config default
+    if req.use_instruction is False:
+        return None
+    if req.use_instruction is not True and not retrieval_defaults.get("use_instruction"):
         return None
 
     # 3. Static instruction from config — zero latency, reliable.
@@ -266,10 +273,14 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
     if static:
         return static
 
-    # 4. Dynamic fallback — only when static is not configured.
+    # 4. Dynamic instruction from secondary LLM.
+    # Pass ALL sub-queries (newline-separated) so the instruction covers
+    # every topic, not just the first one.
     query_text = req.query or ""
     if not query_text and req.sub_queries:
-        query_text = req.sub_queries[0]
+        query_text = "\n".join(
+            s.strip() for s in req.sub_queries if isinstance(s, str) and s.strip()
+        )
     query_text = query_text.strip()
     if not query_text:
         return None
@@ -282,17 +293,26 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
         max_tokens=retrieval_defaults.get("instruction_max_tokens", 128),
         timeout=retrieval_defaults.get("instruction_timeout", 5.0),
     )
-    return instruction
+    if instruction:
+        return instruction
+
+    # 5. Fallback instruction when LLM fails / times out.
+    fallback = retrieval_defaults.get("fallback_instruction", "")
+    if fallback:
+        logger.warning(
+            "instruction: LLM failed; using fallback instruction for query=%r",
+            query_text[:60],
+        )
+        return fallback
+    return None
 
 
 def _apply_threshold_and_budget(
     candidates: List[Dict[str, Any]],
     threshold: float,
     budget: int,
-    score_gap: float = 0.10,
 ) -> List[Dict[str, Any]]:
-    """Filter by cosine threshold, greedily fit into token budget, and
-    truncate at score cliffs to avoid tangentially related passages.
+    """Filter by cosine threshold, then greedily fit into token budget.
 
     Falls back to the top-3 raw candidates when nothing passes the threshold.
     """
@@ -313,24 +333,6 @@ def _apply_threshold_and_budget(
         return fallback
 
     filtered.sort(key=lambda c: -c.get("score", 0.0))
-
-    # Score-gap truncation: if there is a sudden drop in cosine score,
-    # truncate the list to avoid including tangentially related passages.
-    # Only apply when at least 3 passages precede the gap (avoids
-    # over-truncation for sparse results).
-    if len(filtered) > 1 and score_gap > 0:
-        kept_by_score: List[Dict[str, Any]] = [filtered[0]]
-        for c in filtered[1:]:
-            prev_score = kept_by_score[-1].get("score", 0.0)
-            curr_score = c.get("score", 0.0)
-            if len(kept_by_score) >= 3 and (prev_score - curr_score) >= score_gap:
-                logger.info(
-                    "score_gap: truncating at %d passages (%.3f → %.3f gap=%.3f)",
-                    len(kept_by_score), prev_score, curr_score, prev_score - curr_score,
-                )
-                break
-            kept_by_score.append(c)
-        filtered = kept_by_score
 
     result: List[Dict[str, Any]] = []
     total_tokens = 0

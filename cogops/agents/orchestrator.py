@@ -37,7 +37,6 @@ import yaml
 from cogops.agents.pipeline import PipelineConfig, run_factual_pipeline
 from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
-from cogops.pipeline.context_resolve import resolve_references
 from cogops.pipeline.router import route as router_route
 from cogops.pipeline.sanitize import INPUT_INVALID_REFUSAL_BN, sanitize
 from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
@@ -213,26 +212,14 @@ class Orchestrator:
                    ],
                    "turn_id": turn_id}
 
-            # ----- Stage 0.5: Context resolution (pronouns / references) -----
-            resolved_query = await resolve_references(
-                query=clean_query,
-                history=history_messages,
-                secondary_client=self.secondary_service.client_llm,
-                secondary_model=self.secondary_service.model,
-                timeout=3.0,
-            )
-            if resolved_query != clean_query:
-                yield {"type": "context_resolved", "channel": "debug",
-                       "original": clean_query, "resolved": resolved_query,
-                       "turn_id": turn_id}
-
             # ----- Stage 1: Router -----
             try:
                 router_result = await router_route(
-                    query=resolved_query,
+                    query=clean_query,
                     secondary_client=self.secondary_service.client_llm,
                     secondary_model=self.secondary_service.model,
                     timeout=5.0,
+                    history=history_messages,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("Router raised (%s); defaulting to factual_govt.", e)
@@ -297,7 +284,7 @@ class Orchestrator:
             final_text_for_persist: Optional[str] = None
             try:
                 async for event in run_factual_pipeline(
-                    raw_query=clean_query,
+                    raw_query=router_result.raw_query or clean_query,
                     router_result=router_result,
                     history=history_messages,
                     primary_client=self.llm_service.client_llm,

@@ -590,6 +590,72 @@ class TestDisambiguation(unittest.TestCase):
             "aspect variations of the same service must not trigger disambig",
         )
 
+    def test_factual_wiki_skips_disambiguation(self):
+        """Wiki intents must never disambiguate — the corpus naturally spans
+        many distinct (category, sub_category) pairs."""
+        passages = [
+            _passage(701, 0.80, "বাংলাদেশের প্রধানমন্ত্রী",
+                     category="বাংলাদেশের প্রধানমন্ত্রী",
+                     sub_category="বাংলাদেশের প্রধানমন্ত্রী", service="বাংলাদেশের প্রধানমন্ত্রী"),
+            _passage(702, 0.78, "বাংলাদেশের প্রধানমন্ত্রীদের তালিকা",
+                     category="বাংলাদেশের প্রধানমন্ত্রীদের তালিকা",
+                     sub_category="বাংলাদেশের প্রধানমন্ত্রীদের তালিকা", service="বাংলাদেশের প্রধানমন্ত্রীদের তালিকা"),
+            _passage(703, 0.75, "বাংলাদেশের সরকারপ্রধানদের তালিকা",
+                     category="বাংলাদেশের সরকারপ্রধানদের তালিকা",
+                     sub_category="বাংলাদেশের সরকারপ্রধানদের তালিকা", service="বাংলাদেশের সরকারপ্রধানদের তালিকা"),
+        ]
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
+        secondary = _mock_secondary_nli()
+        primary = _mock_primary_stream(["বর্তমান প্রধানমন্ত্রী হলেন … [S1]।"])
+
+        events = asyncio.run(_drain(run_factual_pipeline(
+            raw_query="প্রধান মন্ত্রী কে ?",
+            router_result=_factual_router(["প্রধান মন্ত্রী কে ?"], intent="factual_wiki"),
+            history=[],
+            primary_client=primary,
+            primary_model="qwen36",
+            secondary_client=secondary,
+            secondary_model="qwen36",
+            cfg=PipelineConfig(verifier_enabled=False),
+            http_client=http,
+        )))
+        asyncio.run(http.aclose())
+
+        self.assertFalse(
+            any(e["type"] == "disambiguate_required" for e in events),
+            "factual_wiki must skip disambiguation regardless of distinct categories",
+        )
+
+    def test_factual_mixed_skips_disambiguation(self):
+        """Mixed intents must never disambiguate for the same reason as wiki."""
+        passages = [
+            _passage(801, 0.80, "এনআইডি আবেদন",
+                     category="NID", sub_category="আবেদন", service="NID আবেদন"),
+            _passage(802, 0.78, "পাসপোর্ট আবেদন",
+                     category="পাসপোর্ট", sub_category="আবেদন", service="পাসপোর্ট আবেদন"),
+        ]
+        http = httpx.AsyncClient(transport=_jiggasha_transport(passages))
+        secondary = _mock_secondary_nli()
+        primary = _mock_primary_stream(["তুলনা … [S1] [S2]।"])
+
+        events = asyncio.run(_drain(run_factual_pipeline(
+            raw_query="এনআইডি নাকি পাসপোর্ট?",
+            router_result=_factual_router(["এনআইডি নাকি পাসপোর্ট?"], intent="factual_mixed"),
+            history=[],
+            primary_client=primary,
+            primary_model="qwen36",
+            secondary_client=secondary,
+            secondary_model="qwen36",
+            cfg=PipelineConfig(verifier_enabled=False),
+            http_client=http,
+        )))
+        asyncio.run(http.aclose())
+
+        self.assertFalse(
+            any(e["type"] == "disambiguate_required" for e in events),
+            "factual_mixed must skip disambiguation",
+        )
+
 
 # ============================================================
 # Mode-mix paragraph stripper
