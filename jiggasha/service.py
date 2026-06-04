@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """FastAPI service for Bengali passage retrieval.
 
-POST /search has two content-driven modes:
-
-  Legacy single-query:
-      { "query": "...", "top_k": 20 }
-    →
-      { "query": "...", "results": [...], "hits_total": N }
-
-  Multi-query instruction-based retrieval:
-      { "sub_queries": ["...", "..."],
-        "use_instruction": true,
-        "cosine_threshold": 0.70,
-        "token_budget": 28000 }
-    →
-      { "sub_queries": [...],
-        "passages": [...],
-        "instruction": "...",
-        "elapsed_ms": 123 }
+POST /search (single-query only):
+    { "query": "...",
+      "use_instruction": true,
+      "cosine_threshold": 0.70 }
+  →
+    { "query": "...",
+      "results": [...],
+      "hits_total": N,
+      "instruction": "...",
+      "elapsed_ms": 1234,
+      "timing_ms": {...},
+      "token_usage": {...} }
 
 Usage:
     python3 service.py                    # start on port 10000
@@ -40,6 +35,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from embedder import Embedder
 from instruction import generate_instruction
+from reranker import rerank_passages
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,10 +120,10 @@ def _build_clients() -> None:
         "instruction_temperature": float(retcfg.get("instruction_temperature", 0.2)),
         "instruction_max_tokens": int(retcfg.get("instruction_max_tokens", 128)),
         "instruction_timeout": float(retcfg.get("instruction_timeout_seconds", 5.0)),
+        "rerank_threshold": float(retcfg.get("rerank_threshold", 0.5)),
     }
 
-    # Secondary LLM config (used for dynamic instruction generation).
-    # Reads from "secondary_llm" first, falls back to legacy "rerank" key.
+    # Secondary LLM config (used for dynamic instruction generation + reranking).
     secondary_cfg = _cfg.get("secondary_llm") or _cfg.get("rerank") or {}
     secondary_url = _resolve_env(secondary_cfg.get("base_url_env", "SECONDARY_BASE_URL"))
     secondary_key = _resolve_env(secondary_cfg.get("api_key_env", "SECONDARY_API_KEY"))
@@ -162,47 +158,30 @@ _build_clients()
 # ============================================================ #
 
 class SearchRequest(BaseModel):
-    """One model covers both modes; presence of `sub_queries` selects multi-query."""
-    # Legacy single-query
+    """Single-query retrieval request."""
     query: Optional[str] = None
     retrieval_instruction: Optional[str] = None
     top_k: int = 20
 
-    # Multi-query instruction-based retrieval
-    sub_queries: Optional[List[str]] = None
-    top_k_per_sub: int = 20
-    chunk_type: Optional[str] = None   # "wiki" | "govt_service" | null
-
     # Instruction-based retrieval knobs
     use_instruction: Optional[bool] = None   # None = use config default; True/False = override
     cosine_threshold: Optional[float] = None
-    token_budget: Optional[int] = None
+    token_budget: Optional[int] = None  # deprecated, no longer enforced
+    rerank_threshold: Optional[float] = None  # min rerank_score (0–1) to keep; default 0.5
 
 
 # ============================================================ #
 # Shared helpers
 # ============================================================ #
 
-def _qdrant_topk(query_vec: List[float], top_k: int, chunk_type: Optional[str] = None) -> List[Any]:
+def _qdrant_topk(query_vec: List[float], top_k: int) -> List[Any]:
     """Sync Qdrant call. Caller is responsible for offloading from event loop."""
     if qdrant_client is None:
         raise RuntimeError("Qdrant client not initialised")
-    query_filter = None
-    if chunk_type:
-        from qdrant_client import models
-        query_filter = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="chunk_type",
-                    match=models.MatchValue(value=chunk_type),
-                )
-            ]
-        )
     return qdrant_client.query_points(
         collection_name=_cfg["qdrant"]["collection"],
         query=query_vec,
         limit=top_k,
-        query_filter=query_filter,
     ).points
 
 
@@ -260,9 +239,6 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
         return req.retrieval_instruction.strip()
 
     # 2. Determine whether instruction mode is enabled.
-    #    req.use_instruction = True  → force ON
-    #    req.use_instruction = False → force OFF
-    #    req.use_instruction = None  → fall back to config default
     if req.use_instruction is False:
         return None
     if req.use_instruction is not True and not retrieval_defaults.get("use_instruction"):
@@ -274,14 +250,7 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
         return static
 
     # 4. Dynamic instruction from secondary LLM.
-    # Pass ALL sub-queries (newline-separated) so the instruction covers
-    # every topic, not just the first one.
-    query_text = req.query or ""
-    if not query_text and req.sub_queries:
-        query_text = "\n".join(
-            s.strip() for s in req.sub_queries if isinstance(s, str) and s.strip()
-        )
-    query_text = query_text.strip()
+    query_text = (req.query or "").strip()
     if not query_text:
         return None
 
@@ -307,12 +276,11 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
     return None
 
 
-def _apply_threshold_and_budget(
+def _apply_threshold(
     candidates: List[Dict[str, Any]],
     threshold: float,
-    budget: int,
 ) -> List[Dict[str, Any]]:
-    """Filter by cosine threshold, then greedily fit into token budget.
+    """Filter by cosine threshold only.
 
     Falls back to the top-3 raw candidates when nothing passes the threshold.
     """
@@ -333,24 +301,7 @@ def _apply_threshold_and_budget(
         return fallback
 
     filtered.sort(key=lambda c: -c.get("score", 0.0))
-
-    result: List[Dict[str, Any]] = []
-    total_tokens = 0
-    for c in filtered:
-        tok = int(c.get("llm_token_count", 0))
-        if tok <= 0:
-            # Rough approximation for Bengali text when token count is missing.
-            tok = max(1, len(c.get("text", "")) // 3)
-        if total_tokens + tok > budget:
-            if not result:
-                # First passage alone exceeds budget — include it anyway
-                # (better than returning nothing).
-                result.append(c)
-            break
-        result.append(c)
-        total_tokens += tok
-
-    return result
+    return filtered
 
 
 # ============================================================ #
@@ -382,45 +333,57 @@ def health():
 
 
 # ============================================================ #
-# /search — content-driven dispatch
+# /search — single-query only
 # ============================================================ #
 
 @app.post("/search")
 async def search(req: SearchRequest):
-    """Either legacy single-query or multi-query instruction-based retrieval."""
-    if req.sub_queries and len(req.sub_queries) > 0:
-        return await _search_multi(req)
+    """Single-query instruction-based or raw cosine retrieval."""
     if req.query is not None:
         return await _search_legacy(req)
     raise HTTPException(
         status_code=400,
-        detail="Either `query` (legacy) or `sub_queries` (multi-query) must be provided.",
+        detail="`query` must be provided.",
     )
 
 
 async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
-    """Single-query path. Supports raw cosine or instruction+threshold+budget."""
+    """Single-query path: embed → Qdrant → threshold → LLM rerank."""
     t0 = time.time()
+    timing: Dict[str, int] = {}
+    token_usage: Dict[str, int] = {
+        "instruction_prompt": 0,
+        "instruction_completion": 0,
+        "rerank_prompt": 0,
+        "rerank_completion": 0,
+    }
+
     if embedder is None:
         raise HTTPException(status_code=503, detail="Embedder not initialised")
 
+    t_inst0 = time.time()
     instruction = await _build_retrieval_instruction(req)
+    timing["instruction"] = int((time.time() - t_inst0) * 1000)
+
     query_text = req.query or ""
     embed_text = f"{instruction}\n{query_text}" if instruction else query_text
 
+    t_emb0 = time.time()
     try:
         query_vec = await asyncio.to_thread(embedder.embed, embed_text)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Embedding failed: {e}")
+    timing["embedding"] = int((time.time() - t_emb0) * 1000)
 
     top_k = req.top_k or _cfg["qdrant"].get("top_k", 20)
-    # When using instructions we fetch more candidates so the threshold has
-    # enough data to work with.
     fetch_k = retrieval_defaults.get("top_k_fetch", 50) if instruction else top_k
+
+    t_qdr0 = time.time()
     try:
-        hits = await asyncio.to_thread(_qdrant_topk, query_vec, fetch_k, req.chunk_type)
+        hits = await asyncio.to_thread(_qdrant_topk, query_vec, fetch_k)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Qdrant search failed: {e}")
+    timing["qdrant"] = int((time.time() - t_qdr0) * 1000)
 
     results = [_hit_to_passage(h) for h in (hits or [])]
 
@@ -430,178 +393,55 @@ async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
             if req.cosine_threshold is not None
             else retrieval_defaults.get("cosine_threshold", 0.70)
         )
-        budget = (
-            req.token_budget
-            if req.token_budget is not None
-            else retrieval_defaults.get("token_budget", 28000)
+        results = _apply_threshold(results, threshold)
+
+    # Rerank if instruction mode and we have candidates
+    if instruction and results and secondary_client is not None:
+        t_rer0 = time.time()
+        results, rerank_prompt_tok, rerank_compl_tok = await rerank_passages(
+            query_text, results, secondary_client, secondary_model
         )
-        results = _apply_threshold_and_budget(results, threshold, budget)
+        timing["rerank"] = int((time.time() - t_rer0) * 1000)
+        token_usage["rerank_prompt"] = rerank_prompt_tok
+        token_usage["rerank_completion"] = rerank_compl_tok
+
+        # Keep only passages that pass the rerank threshold
+        rerank_threshold = (
+            req.rerank_threshold
+            if req.rerank_threshold is not None
+            else retrieval_defaults.get("rerank_threshold", 0.5)
+        )
+        before_filter = len(results)
+        results = [r for r in results if r.get("rerank_score", 0.0) >= rerank_threshold]
+        if len(results) < before_filter:
+            logger.info(
+                "rerank: dropped %d passages below rerank_threshold %.2f",
+                before_filter - len(results), rerank_threshold,
+            )
+    else:
+        timing["rerank"] = 0
 
     elapsed = time.time() - t0
     top_score = results[0]["score"] if results else 0.0
+    top_rerank = results[0].get("rerank_score") if results else None
     logger.info(
-        "search[legacy]: query=%r instruction=%s hits=%d top_score=%.3f elapsed=%dms",
+        "search[legacy]: query=%r instruction=%s hits=%d top_cosine=%.3f top_rerank=%s elapsed=%dms",
         (req.query or "")[:50],
         "yes" if instruction else "no",
         len(results),
         top_score,
+        f"{top_rerank:.3f}" if top_rerank is not None else "n/a",
         int(elapsed * 1000),
     )
+
     return {
         "query": req.query,
         "results": results,
         "hits_total": len(results),
-    }
-
-
-async def _embed_and_query(
-    sub_idx: int,
-    query: str,
-    top_k: int,
-    chunk_type: Optional[str] = None,
-    instruction: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Embed + Qdrant top-K for one sub-query. Annotates each hit with sub_idx."""
-    if embedder is None:
-        raise RuntimeError("Embedder not initialised")
-    embed_text = f"{instruction}\n{query}" if instruction else query
-    vec = await asyncio.to_thread(embedder.embed, embed_text)
-    hits = await asyncio.to_thread(_qdrant_topk, vec, top_k, chunk_type)
-    out: List[Dict[str, Any]] = []
-    for h in hits or []:
-        p = _hit_to_passage(h)
-        p["_sub_idx"] = sub_idx
-        out.append(p)
-    return out
-
-
-def _merge_candidates_raw(
-    per_sub: List[List[Dict[str, Any]]],
-    global_cap: int,
-) -> List[Dict[str, Any]]:
-    """Dedupe by passage_id, keep highest cosine, track sub provenance."""
-    merged: Dict[int, Dict[str, Any]] = {}
-    for hits in per_sub:
-        for p in hits:
-            pid = int(p.get("passage_id", 0))
-            if pid <= 0:
-                continue
-            sub_idx = int(p.get("_sub_idx", 0))
-            score = float(p.get("score", 0.0))
-            existing = merged.get(pid)
-            if existing is None:
-                merged[pid] = {
-                    "passage_id": pid,
-                    "text": p.get("text", ""),
-                    "category": p.get("category", ""),
-                    "sub_category": p.get("sub_category", ""),
-                    "service": p.get("service", ""),
-                    "topic": p.get("topic", ""),
-                    "chunk_type": p.get("chunk_type", ""),
-                    "llm_token_count": int(p.get("llm_token_count", 0)),
-                    "score": score,
-                    "_sub_indices": [sub_idx],
-                }
-            else:
-                if sub_idx not in existing["_sub_indices"]:
-                    existing["_sub_indices"].append(sub_idx)
-                if score > existing["score"]:
-                    existing["score"] = score
-    out = sorted(merged.values(), key=lambda c: -c["score"])
-    return out[:global_cap]
-
-
-async def _search_multi(req: SearchRequest) -> Dict[str, Any]:
-    """Multi-query path: parallel embed+Qdrant, merge, threshold+budget filter."""
-    sub_queries = [s for s in (req.sub_queries or []) if isinstance(s, str) and s.strip()]
-    if not sub_queries:
-        raise HTTPException(status_code=400, detail="`sub_queries` is empty.")
-    if len(sub_queries) > 8:
-        raise HTTPException(status_code=400, detail="`sub_queries` exceeds limit (8).")
-
-    if embedder is None or qdrant_client is None:
-        raise HTTPException(status_code=503, detail="Service backends not ready")
-
-    t0 = time.time()
-
-    instruction = await _build_retrieval_instruction(req)
-    use_instruction_mode = instruction is not None
-
-    if use_instruction_mode:
-        # Fetch more candidates so threshold has material to work with.
-        fetch_k = retrieval_defaults.get("top_k_fetch", 50)
-    else:
-        fetch_k = req.top_k_per_sub or _cfg["qdrant"].get("top_k", 20)
-
-    try:
-        chunk_type = req.chunk_type
-        per_sub = await asyncio.gather(*[
-            _embed_and_query(i, q, fetch_k, chunk_type, instruction)
-            for i, q in enumerate(sub_queries)
-        ])
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Retrieval failed: {e}")
-
-    global_cap = retrieval_defaults.get("top_k_fetch", 50)
-    candidates = _merge_candidates_raw(per_sub, global_cap)
-
-    if not candidates:
-        return {
-            "sub_queries": sub_queries,
-            "passages": [],
-            "instruction": instruction,
-            "elapsed_ms": int((time.time() - t0) * 1000),
-        }
-
-    if use_instruction_mode:
-        threshold = (
-            req.cosine_threshold
-            if req.cosine_threshold is not None
-            else retrieval_defaults.get("cosine_threshold", 0.70)
-        )
-        budget = (
-            req.token_budget
-            if req.token_budget is not None
-            else retrieval_defaults.get("token_budget", 28000)
-        )
-        kept = _apply_threshold_and_budget(candidates, threshold, budget)
-    else:
-        # Raw cosine mode: no threshold, just return merged top results.
-        kept = candidates
-
-    passages_out = [_candidate_to_passage(c) for c in kept]
-
-    elapsed = time.time() - t0
-    total_tokens = sum(c.get("llm_token_count", 0) for c in kept)
-    logger.info(
-        "search[multi]: subs=%d instruction=%s candidates=%d kept=%d "
-        "threshold=%s budget=%s tokens_used=%d elapsed=%dms",
-        len(sub_queries), "yes" if instruction else "no",
-        len(candidates), len(kept),
-        f"{threshold:.2f}" if use_instruction_mode else "n/a",
-        f"{budget}" if use_instruction_mode else "n/a",
-        total_tokens, int(elapsed * 1000),
-    )
-    return {
-        "sub_queries": sub_queries,
-        "passages": passages_out,
         "instruction": instruction,
         "elapsed_ms": int(elapsed * 1000),
-    }
-
-
-def _candidate_to_passage(c: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a candidate dict to the passage response shape."""
-    return {
-        "passage_id": c.get("passage_id", 0),
-        "text": c.get("text", ""),
-        "category": c.get("category", ""),
-        "sub_category": c.get("sub_category", ""),
-        "service": c.get("service", ""),
-        "topic": c.get("topic", ""),
-        "chunk_type": c.get("chunk_type", ""),
-        "llm_token_count": c.get("llm_token_count", 0),
-        "score": c.get("score", 0.0),
+        "timing_ms": timing,
+        "token_usage": token_usage,
     }
 
 
