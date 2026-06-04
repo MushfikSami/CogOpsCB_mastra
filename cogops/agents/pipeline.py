@@ -30,6 +30,7 @@ This module is intentionally framework-light: depends only on
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -68,12 +69,13 @@ class PipelineConfig:
     jiggasha_endpoint: str = "http://localhost:10000/search"
     jiggasha_timeout: float = 45.0
     top_k_fetch: int = 50
-    chunk_type: Optional[str] = None   # "govt_service" | "wiki" | null
+    chunk_type: Optional[str] = None   # DEPRECATED: no longer sent to Jiggasha
 
     # Instruction-based retrieval
     use_instruction: bool = True
     cosine_threshold: Optional[float] = None
-    token_budget: Optional[int] = None
+    token_budget: Optional[int] = None   # forwarded to Jiggasha; enforced there
+    rerank_threshold: Optional[float] = 0.50   # min LLM rerank score (0–1)
 
     # Composer
     composer_temperature: float = 0.1
@@ -90,6 +92,9 @@ class PipelineConfig:
     disambig_min_distinct_services: int = 2
     disambig_short_query_token_cap: int = 8
     disambig_candidate_cap: int = 6   # max candidates shown to the user
+
+    # ReAct retrieval loop
+    max_react_iterations: int = 0   # 0 = disabled; 1-2 = judge + refine
 
     # Refusals
     refusal_text_bn: str = (
@@ -112,22 +117,22 @@ def _evt(type_: str, channel: str = "debug", **payload: Any) -> Dict[str, Any]:
 async def _call_jiggasha(
     http: httpx.AsyncClient,
     endpoint: str,
-    sub_queries: List[str],
+    query: str,
     cfg: PipelineConfig,
 ) -> Dict[str, Any]:
-    """POST one /search to Jiggasha.
+    """POST one /search to Jiggasha (single-query).
 
     Retries on transient 5xx / network errors. Two retries with exponential
     backoff are enough to mask brief overload signals. Raises on the final
     failure.
     """
     payload = {
-        "sub_queries": sub_queries,
-        "top_k_per_sub": cfg.top_k_fetch,
-        "chunk_type": cfg.chunk_type,
+        "query": query,
+        "top_k": cfg.top_k_fetch,
         "use_instruction": cfg.use_instruction,
         "cosine_threshold": cfg.cosine_threshold,
         "token_budget": cfg.token_budget,
+        "rerank_threshold": cfg.rerank_threshold,
     }
     last_exc: Optional[Exception] = None
     for attempt in range(3):
@@ -149,6 +154,209 @@ async def _call_jiggasha(
     if last_exc:
         raise last_exc
     raise RuntimeError("jiggasha call failed without exception")
+
+
+async def _call_jiggasha_multi(
+    http: httpx.AsyncClient,
+    endpoint: str,
+    queries: List[str],
+    cfg: PipelineConfig,
+) -> Dict[str, Any]:
+    """Call Jiggasha once per query in parallel, then merge & deduplicate.
+
+    Returns a unified dict with the same shape as a single Jiggasha response
+    so downstream code doesn't need to change:
+        {
+            "queries": [...],
+            "results": [merged_passages],
+            "hits_total": N,
+            "instructions": [...],
+            "elapsed_ms": <wall_clock>,
+            "timing_ms": {...},
+            "token_usage": {...},
+        }
+    """
+    if not queries:
+        return {
+            "queries": [],
+            "results": [],
+            "hits_total": 0,
+            "instructions": [],
+            "elapsed_ms": 0,
+            "timing_ms": {},
+            "token_usage": {},
+        }
+
+    coros = [_call_jiggasha(http, endpoint, q, cfg) for q in queries]
+    raw_results = await asyncio.gather(*coros, return_exceptions=True)
+
+    merged_passages: Dict[int, Dict[str, Any]] = {}
+    all_instructions: List[Optional[str]] = []
+    max_elapsed = 0
+    timing_agg: Dict[str, List[int]] = {"instruction": [], "embedding": [], "qdrant": [], "rerank": []}
+    token_agg: Dict[str, int] = {
+        "instruction_prompt": 0,
+        "instruction_completion": 0,
+        "rerank_prompt": 0,
+        "rerank_completion": 0,
+    }
+    errors: List[str] = []
+    first_exc: Optional[Exception] = None
+
+    for res in raw_results:
+        if isinstance(res, Exception):
+            errors.append(str(res))
+            if first_exc is None:
+                first_exc = res
+            continue
+
+        # Response timing
+        max_elapsed = max(max_elapsed, res.get("elapsed_ms", 0) or 0)
+        tm = res.get("timing_ms") or {}
+        for k in timing_agg:
+            v = tm.get(k)
+            if isinstance(v, (int, float)):
+                timing_agg[k].append(int(v))
+
+        # Token usage
+        tu = res.get("token_usage") or {}
+        for k in token_agg:
+            v = tu.get(k)
+            if isinstance(v, (int, float)):
+                token_agg[k] += int(v)
+
+        # Instruction
+        all_instructions.append(res.get("instruction"))
+
+        # Passages — deduplicate by passage_id, keep highest rerank_score
+        for p in (res.get("results") or []):
+            pid = p.get("passage_id")
+            if pid is None:
+                continue
+            existing = merged_passages.get(pid)
+            if existing is None:
+                merged_passages[pid] = dict(p)
+            else:
+                # Keep the one with higher rerank_score, or higher cosine score
+                new_score = p.get("rerank_score")
+                old_score = existing.get("rerank_score")
+                if new_score is not None and old_score is not None:
+                    if new_score > old_score:
+                        merged_passages[pid] = dict(p)
+                elif new_score is not None:
+                    merged_passages[pid] = dict(p)
+                elif p.get("score", 0.0) > existing.get("score", 0.0):
+                    merged_passages[pid] = dict(p)
+
+    # If every call failed, raise the first exception so upstream can emit
+    # a jiggasha_failed refusal rather than a no_passages refusal.
+    if not merged_passages and first_exc is not None:
+        raise first_exc
+
+    # Sort merged passages: rerank_score desc, then cosine score desc
+    def _sort_key(p: Dict[str, Any]) -> Tuple[float, float]:
+        rs = p.get("rerank_score")
+        return (
+            -(rs if rs is not None else 0.0),
+            -(p.get("score", 0.0)),
+        )
+
+    sorted_passages = sorted(merged_passages.values(), key=_sort_key)
+
+    # Aggregate timing: max per category (wall-clock for parallel calls)
+    timing_merged = {k: max(v) if v else 0 for k, v in timing_agg.items()}
+
+    return {
+        "queries": queries,
+        "results": sorted_passages,
+        "hits_total": len(sorted_passages),
+        "instructions": [i for i in all_instructions if i],
+        "elapsed_ms": max_elapsed,
+        "timing_ms": timing_merged,
+        "token_usage": token_agg,
+        "errors": errors if errors else None,
+    }
+
+
+# ============================================================
+# RetrievalJudge — ReAct loop helper
+# ============================================================
+
+_JUDGE_SYSTEM_PROMPT = """\
+You are a retrieval judge for a Bangladesh government-services chatbot.
+
+You will be given a user query and up to 5 retrieved passages. Decide whether
+the passages are SUFFICIENT to directly answer the query.
+
+"Sufficient" means at least one passage explicitly covers the user's exact
+subject (procedure, fee, eligibility, contact, office, etc.), not just a
+topically related area.
+
+Output ONLY a JSON object with this exact shape:
+  {"sufficient": true}
+or
+  {"sufficient": false, "refined_query": "<improved formal Bengali query>"}
+
+If insufficient, provide a refined_query that is more specific and formal.
+Keep the refined query concise (under 20 words)."""
+
+
+async def _judge_retrieval_sufficiency(
+    query: str,
+    passages: List[Dict[str, Any]],
+    secondary_client: AsyncOpenAI,
+    secondary_model: str,
+    timeout: float = 5.0,
+) -> Tuple[bool, Optional[str]]:
+    """Judge whether retrieved passages are sufficient to answer the query.
+
+    Returns (is_sufficient, refined_query_or_none).
+    On any failure, returns (True, None) — fail-open so retrieval never blocks.
+    """
+    if not passages:
+        return False, query
+
+    # Summarise top-5 passages for the judge (token budget friendly).
+    summary_lines: List[str] = []
+    for i, p in enumerate(passages[:5], start=1):
+        text = (p.get("text") or "")[:300]
+        summary_lines.append(f"[{i}] {text}")
+    passage_block = "\n\n".join(summary_lines)
+
+    user_msg = (
+        f"Query: {query}\n\n"
+        f"Retrieved passages:\n{passage_block}\n\n"
+        "Is this sufficient to answer the query directly?"
+    )
+
+    try:
+        resp = await asyncio.wait_for(
+            secondary_client.chat.completions.create(
+                model=secondary_model,
+                messages=[
+                    {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=128,
+            ),
+            timeout=timeout,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        data = json.loads(raw)
+        sufficient = bool(data.get("sufficient", False))
+        refined = data.get("refined_query")
+        if isinstance(refined, str):
+            refined = refined.strip()
+            if not refined:
+                refined = None
+        else:
+            refined = None
+        return sufficient, refined
+    except Exception as e:  # noqa: BLE001
+        logger.warning("RetrievalJudge failed (%s); assuming sufficient.", e)
+        return True, None
 
 
 def _build_source_map_from_passages(
@@ -420,7 +628,7 @@ async def run_factual_pipeline(
     http = http_client or httpx.AsyncClient(timeout=cfg.jiggasha_timeout)
     try:
         try:
-            jres = await _call_jiggasha(
+            jres = await _call_jiggasha_multi(
                 http, cfg.jiggasha_endpoint, sub_queries, cfg,
             )
         except Exception as e:  # noqa: BLE001
@@ -441,16 +649,18 @@ async def run_factual_pipeline(
         if own_http:
             await http.aclose()
 
-    passages = jres.get("passages", []) or []
-    instruction = jres.get("instruction")
+    passages = jres.get("results", []) or []
+    instruction = jres.get("instructions")  # list of instructions
     retrieval_elapsed_ms = jres.get("elapsed_ms")
+    jiggasha_errors = jres.get("errors")
 
     yield _evt(
         "retrieval_done",
         passages=passages,
         passages_returned=len(passages),
-        instruction=instruction,
+        instructions=instruction,
         elapsed_ms=retrieval_elapsed_ms,
+        jiggasha_errors=jiggasha_errors,
     )
 
     if not passages:
@@ -462,6 +672,45 @@ async def run_factual_pipeline(
         )
         yield _evt("answer_complete", channel="both")
         return
+
+    # ------------------------------------------------------------
+    # ReAct retrieval loop — judge sufficiency, refine if needed
+    # ------------------------------------------------------------
+    if cfg.max_react_iterations > 0 and secondary_client is not None:
+        for iteration in range(cfg.max_react_iterations):
+            sufficient, refined = await _judge_retrieval_sufficiency(
+                raw_query, passages, secondary_client, secondary_model,
+            )
+            if sufficient or not refined:
+                break
+            # Fresh client per iteration (original client already closed).
+            react_http = httpx.AsyncClient(timeout=cfg.jiggasha_timeout)
+            try:
+                jres_refined = await _call_jiggasha_multi(
+                    react_http, cfg.jiggasha_endpoint, [refined], cfg,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ReAct retrieval failed on iteration %d: %s", iteration + 1, e)
+                break
+            finally:
+                await react_http.aclose()
+            new_passages = jres_refined.get("results", []) or []
+            existing_ids = {p["passage_id"] for p in passages if p.get("passage_id") is not None}
+            added = 0
+            for p in new_passages:
+                pid = p.get("passage_id")
+                if pid is not None and pid not in existing_ids:
+                    passages.append(p)
+                    existing_ids.add(pid)
+                    added += 1
+            yield _evt(
+                "retrieval_refined",
+                iteration=iteration + 1,
+                refined_query=refined,
+                new_passages=added,
+            )
+            if added == 0:
+                break
 
     source_map = _build_source_map_from_passages(passages)
     yield _evt(
@@ -647,9 +896,17 @@ def _strip_composer_sources_block(text: str) -> str:
     if not text:
         return text
     patterns = [
+        # --- separator style
         r"\n+---\s*\n+\*\*\s*(?:সূত্র|উৎস|Sources)\b",
+        r"(?:^|\n+)---\s*\n+\*\*\s*(?:সূত্র|উৎস|Sources)\b",
+        # **bold header style
         r"\n+\*\*\s*(?:সূত্র|উৎস|Sources)\s*\(?(?:Sources)?\)?\s*\*\*",
+        r"(?:^|\n+)\*\*\s*(?:সূত্র|উৎস|Sources)\s*\(?(?:Sources)?\)?\s*\*\*",
+        # plain header style
         r"\n+(?:সূত্র|উৎস|Sources)\s*[:：]",
+        r"(?:^|\n+)(?:সূত্র|উৎস|Sources)\s*[:：]",
+        # bullet-list-of-tags at end (composer sometimes emits bare list)
+        r"\n+(?:\s*[-*]\s*\[S\d+\][^\n]*\n*)+$",
     ]
     for pat in patterns:
         m = re.search(pat, text, flags=re.IGNORECASE)
@@ -813,6 +1070,10 @@ async def _post_flight(
 
     if cleaned.strip() == cfg.refusal_text_bn.strip():
         return cfg.refusal_text_bn, events, ""
+
+    # Final safety net: if the composer STILL emitted a sources block that
+    # survived stripping, cut it before appending the canonical one.
+    cleaned = _strip_composer_sources_block(cleaned).rstrip()
 
     used_tags_after = extract_citation_tags(cleaned)
     sources_block = build_sources_block(source_map, used_tags_after)

@@ -1,9 +1,9 @@
 # Jiggasha — Bengali passage retrieval service.
 #
 # POST /search (single-query only):
-#   POST {query, use_instruction: true, cosine_threshold: 0.70, rerank_threshold: 0.50}
+#   POST {query, use_instruction: true, cosine_threshold: 0.70}
 #   → embed query (prefixed with LLM-generated instruction)
-#   → Qdrant top-K → cosine threshold → LLM rerank (0-10 score) → rerank threshold.
+#   → Qdrant top-K → cosine threshold → token budget.
 
 csv_path: "data.csv"
 port: 10000
@@ -38,10 +38,9 @@ retrieval:
   static_instruction: ""              # empty = use dynamic LLM-generated instruction
   # Fallback instruction used when the dynamic LLM generator fails or times out.
   fallback_instruction: "Retrieve passages that are directly relevant to answering the user's query. Only include passages that provide factual information needed for the answer."
-  cosine_threshold: 0.70
-  token_budget: 28000                  # deprecated, no longer enforced
+  cosine_threshold: 0.60
+  token_budget: 16000                  # max cumulative tokens to return
   top_k_fetch: 50
   instruction_temperature: 0.2
   instruction_max_tokens: 128
   instruction_timeout_seconds: 5.0
-  rerank_threshold: 0.50               # min rerank_score (0-1) to keep after LLM rerank

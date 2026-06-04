@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from embedder import Embedder
 from instruction import generate_instruction
-from reranker import rerank_passages
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,16 +114,16 @@ def _build_clients() -> None:
         "static_instruction": (retcfg.get("static_instruction") or "").strip(),
         "fallback_instruction": (retcfg.get("fallback_instruction") or "").strip(),
         "cosine_threshold": float(retcfg.get("cosine_threshold", 0.70)),
-        "token_budget": int(retcfg.get("token_budget", 28000)),
+        "token_budget": int(retcfg.get("token_budget", 16000)),
         "top_k_fetch": int(retcfg.get("top_k_fetch", 50)),
         "instruction_temperature": float(retcfg.get("instruction_temperature", 0.2)),
         "instruction_max_tokens": int(retcfg.get("instruction_max_tokens", 128)),
         "instruction_timeout": float(retcfg.get("instruction_timeout_seconds", 5.0)),
-        "rerank_threshold": float(retcfg.get("rerank_threshold", 0.5)),
+
     }
 
-    # Secondary LLM config (used for dynamic instruction generation + reranking).
-    secondary_cfg = _cfg.get("secondary_llm") or _cfg.get("rerank") or {}
+    # Secondary LLM config (used for dynamic instruction generation).
+    secondary_cfg = _cfg.get("secondary_llm") or {}
     secondary_url = _resolve_env(secondary_cfg.get("base_url_env", "SECONDARY_BASE_URL"))
     secondary_key = _resolve_env(secondary_cfg.get("api_key_env", "SECONDARY_API_KEY"))
     secondary_model = _resolve_env(secondary_cfg.get("model_env", "SECONDARY_MODEL_NAME"))
@@ -166,8 +165,7 @@ class SearchRequest(BaseModel):
     # Instruction-based retrieval knobs
     use_instruction: Optional[bool] = None   # None = use config default; True/False = override
     cosine_threshold: Optional[float] = None
-    token_budget: Optional[int] = None  # deprecated, no longer enforced
-    rerank_threshold: Optional[float] = None  # min rerank_score (0–1) to keep; default 0.5
+    token_budget: Optional[int] = None  # max cumulative tokens to return; default 28000
 
 
 # ============================================================ #
@@ -276,11 +274,42 @@ async def _build_retrieval_instruction(req: SearchRequest) -> Optional[str]:
     return None
 
 
-def _apply_threshold(
+def _apply_token_budget(
+    candidates: List[Dict[str, Any]],
+    token_budget: int,
+) -> List[Dict[str, Any]]:
+    """Enforce token budget on candidates already in priority order.
+
+    Keeps candidates in order until cumulative token count would exceed budget.
+    The first candidate is always kept even if it alone exceeds the budget.
+    When llm_token_count is missing/0, approximates as len(text)//3.
+    """
+    if not candidates:
+        return []
+
+    kept: List[Dict[str, Any]] = []
+    total = 0
+    for c in candidates:
+        tok = int(c.get("llm_token_count", 0))
+        if tok == 0:
+            tok = max(1, len(c.get("text", "")) // 3)
+        if kept and total + tok > token_budget:
+            logger.info(
+                "budget: stopped after %d passages (%d/%d tokens); dropping %d more",
+                len(kept), total, token_budget, len(candidates) - len(kept),
+            )
+            break
+        kept.append(c)
+        total += tok
+    return kept
+
+
+def _apply_threshold_and_budget(
     candidates: List[Dict[str, Any]],
     threshold: float,
+    token_budget: int,
 ) -> List[Dict[str, Any]]:
-    """Filter by cosine threshold only.
+    """Filter by cosine threshold, sort by score desc, then enforce token budget.
 
     Falls back to the top-3 raw candidates when nothing passes the threshold.
     """
@@ -298,10 +327,35 @@ def _apply_threshold(
             candidates[0].get("score", 0.0) if candidates else 0.0,
             len(fallback),
         )
-        return fallback
+        filtered = fallback
 
     filtered.sort(key=lambda c: -c.get("score", 0.0))
-    return filtered
+    return _apply_token_budget(filtered, token_budget)
+
+
+def _merge_candidates_raw(
+    per_sub: List[List[Dict[str, Any]]],
+    global_cap: int = 50,
+) -> List[Dict[str, Any]]:
+    """Merge candidates from multiple sub-queries, deduplicate by passage_id."""
+    best: Dict[int, Dict[str, Any]] = {}
+    for sub_idx, sub_list in enumerate(per_sub):
+        for c in sub_list:
+            pid = int(c.get("passage_id", 0))
+            if pid <= 0:
+                continue
+            if pid not in best:
+                best[pid] = dict(c)
+                best[pid].setdefault("_sub_indices", []).append(sub_idx)
+            elif c.get("score", 0.0) > best[pid].get("score", 0.0):
+                old_indices = best[pid].get("_sub_indices", [])
+                best[pid] = dict(c)
+                best[pid]["_sub_indices"] = old_indices + [sub_idx]
+            else:
+                best[pid].setdefault("_sub_indices", []).append(sub_idx)
+
+    merged = sorted(best.values(), key=lambda c: -c.get("score", 0.0))
+    return merged[:global_cap]
 
 
 # ============================================================ #
@@ -348,14 +402,12 @@ async def search(req: SearchRequest):
 
 
 async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
-    """Single-query path: embed → Qdrant → threshold → LLM rerank."""
+    """Single-query path: embed → Qdrant → threshold → token budget."""
     t0 = time.time()
     timing: Dict[str, int] = {}
     token_usage: Dict[str, int] = {
         "instruction_prompt": 0,
         "instruction_completion": 0,
-        "rerank_prompt": 0,
-        "rerank_completion": 0,
     }
 
     if embedder is None:
@@ -393,44 +445,24 @@ async def _search_legacy(req: SearchRequest) -> Dict[str, Any]:
             if req.cosine_threshold is not None
             else retrieval_defaults.get("cosine_threshold", 0.70)
         )
-        results = _apply_threshold(results, threshold)
+        results = _apply_threshold_and_budget(results, threshold, token_budget=999_999_999)
 
-    # Rerank if instruction mode and we have candidates
-    if instruction and results and secondary_client is not None:
-        t_rer0 = time.time()
-        results, rerank_prompt_tok, rerank_compl_tok = await rerank_passages(
-            query_text, results, secondary_client, secondary_model
-        )
-        timing["rerank"] = int((time.time() - t_rer0) * 1000)
-        token_usage["rerank_prompt"] = rerank_prompt_tok
-        token_usage["rerank_completion"] = rerank_compl_tok
-
-        # Keep only passages that pass the rerank threshold
-        rerank_threshold = (
-            req.rerank_threshold
-            if req.rerank_threshold is not None
-            else retrieval_defaults.get("rerank_threshold", 0.5)
-        )
-        before_filter = len(results)
-        results = [r for r in results if r.get("rerank_score", 0.0) >= rerank_threshold]
-        if len(results) < before_filter:
-            logger.info(
-                "rerank: dropped %d passages below rerank_threshold %.2f",
-                before_filter - len(results), rerank_threshold,
-            )
-    else:
-        timing["rerank"] = 0
+    # Apply token budget universally (instruction mode or raw cosine)
+    token_budget = (
+        req.token_budget
+        if req.token_budget is not None
+        else retrieval_defaults.get("token_budget", 28000)
+    )
+    results = _apply_token_budget(results, token_budget)
 
     elapsed = time.time() - t0
     top_score = results[0]["score"] if results else 0.0
-    top_rerank = results[0].get("rerank_score") if results else None
     logger.info(
-        "search[legacy]: query=%r instruction=%s hits=%d top_cosine=%.3f top_rerank=%s elapsed=%dms",
+        "search[legacy]: query=%r instruction=%s hits=%d top_cosine=%.3f elapsed=%dms",
         (req.query or "")[:50],
         "yes" if instruction else "no",
         len(results),
         top_score,
-        f"{top_rerank:.3f}" if top_rerank is not None else "n/a",
         int(elapsed * 1000),
     )
 

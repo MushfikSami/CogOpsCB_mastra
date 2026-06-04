@@ -6,7 +6,6 @@ Endpoints:
   GET  /health       — Service health (LLM, Redis)
   POST /session/clear — Clear conversation for a user
   GET  /query-log    — Last N query entries
-  GET  /session/audit — Session trace summaries
 """
 
 import asyncio
@@ -14,20 +13,18 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 from cogops.agents.orchestrator import Orchestrator
-from cogops.events.channels import filter_for_user, filter_for_debug
-from cogops.session.query_log import QueryLog
-from cogops.session.session_logger import SessionLogger
+from cogops.events.channels import filter_for_debug, filter_for_user
+from cogops.session.logger import QuerySessionLogger
 
 load_dotenv()
 
@@ -36,7 +33,7 @@ API_PORT = int(os.getenv("API_PORT", "9000"))
 API_HOST = "0.0.0.0"
 AGENT_CONFIG_PATH = "configs/config.yml"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("api")
 
 # --- App ---
@@ -54,9 +51,8 @@ app.add_middleware(
 active_sessions: Dict[str, Orchestrator] = {}
 session_lock = asyncio.Lock()
 
-# --- Singleton loggers ---
-_query_log = QueryLog()
-_session_logger = SessionLogger()
+# --- Singleton logger ---
+_session_logger = QuerySessionLogger()
 
 # --- UI ---
 _UI_INDEX_PATH = os.path.join(os.path.dirname(__file__), "cogops", "ui", "index.html")
@@ -96,8 +92,7 @@ async def get_agent_session(user_id: str) -> Orchestrator:
 # --- Endpoints ---
 @app.get("/ui", response_class=HTMLResponse)
 async def ui_root():
-    """Single-page chat UI. User mode by default; paste a debug key in the
-    page to switch to debug mode (server filters debug events on header)."""
+    """Single-page chat UI."""
     return HTMLResponse(content=_UI_INDEX_HTML)
 
 
@@ -126,7 +121,7 @@ async def health_check():
     except Exception:
         status["redis"] = "error"
 
-    status["active_sessions"] = len(active_sessions)
+    status["active_sessions"] = str(len(active_sessions))
     return status
 
 
@@ -138,26 +133,23 @@ async def stream_chat(
     """Main chat endpoint. Streams NDJSON events.
 
     Without a valid `X-Debug-Key` header, the stream is filtered to
-    user-visible events only (answer_chunk / final_answer / answer_complete /
-    fatal error). With the correct key, all debug events pass through.
+    user-visible events only. With the correct key, all debug events pass through.
     """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     agent = await get_agent_session(request.user_id)
 
-    _query_log.append(request.query)
+    _session_logger.append_query(request.query)
     server_secret = os.getenv("ADMIN_DEBUG_SECRET")
     debug_mode = False
     if x_debug_key:
         if server_secret == "":
-            # Empty secret in config → accept any non-empty key (local dev convenience)
             debug_mode = True
         else:
             debug_mode = x_debug_key == server_secret
 
     session_id = _session_logger.start_session(request.user_id, request.query)
-
     request_id = str(uuid.uuid4())[:8]
     logger.info("[req:%s] Chat request from %s", request_id, request.user_id)
 
@@ -183,37 +175,9 @@ async def stream_chat(
 
 
 @app.get("/query-log")
-async def query_log_endpoint():
+async def query_log_endpoint(limit: int = 500):
     """Return stored queries (last 10 days)."""
-    return _query_log.entries
-
-
-@app.get("/session/audit")
-async def audit_endpoint(limit: int = 20):
-    """Return session trace summaries."""
-    traces = _session_logger.get_traces(limit=limit)
-    summary = []
-    for t in traces:
-        summary.append({
-            "user_id": t.get("user_id"),
-            "query": t.get("query"),
-            "session_id": t.get("session_id"),
-            "start_time": t.get("start_time"),
-            "end_time": t.get("end_time"),
-            "event_count": t.get("event_count"),
-            "tool_call_count": t.get("tool_call_count"),
-            "tool_results": t.get("tool_results", []),
-            "reasoning_chunks": t.get("reasoning_chunks", []),
-            "total_answer": t.get("total_answer", ""),
-            "total_reasoning": t.get("total_reasoning", ""),
-        })
-    return summary
-
-
-@app.get("/session/audit/raw")
-async def audit_raw_endpoint(limit: int = 20):
-    """Return full session traces."""
-    return _session_logger.get_traces(limit=limit)
+    return _session_logger.get_queries(limit=limit)
 
 
 @app.post("/session/clear")

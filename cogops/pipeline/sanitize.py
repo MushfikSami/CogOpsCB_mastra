@@ -17,6 +17,7 @@ pipeline emits the static input-invalid refusal and stops before any LLM call.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Tuple
@@ -24,6 +25,15 @@ from typing import Tuple
 MAX_QUERY_CHARS = 4096
 MAX_REPETITION_RUN = 100
 MAX_CONTROL_FRACTION = 0.10
+
+# Entropy: legitimate Bengali text is usually > 2.0 bits/char.
+# Below this threshold suggests repetitive / low-information input.
+MIN_ENTROPY_BITS = 1.5
+
+# Token bomb: average token length below this with enough tokens suggests
+# synthetic low-density input (e.g. "a a a a …" or "অ অ অ অ …").
+TOKEN_BOMB_MIN_WORDS = 12
+TOKEN_BOMB_MAX_AVG_LEN = 2.0
 
 # Refusal text shown to the user when sanitize fails. Single line, Bengali.
 INPUT_INVALID_REFUSAL_BN = (
@@ -37,6 +47,8 @@ REASON_TOO_LONG = "too_long"
 REASON_BINARY_OR_CONTROL = "binary_or_control"
 REASON_INJECTION = "injection_attempt"
 REASON_SPAM = "spam"
+REASON_LOW_ENTROPY = "low_entropy"
+REASON_TOKEN_BOMB = "token_bomb"
 
 # Obvious prompt-injection markers. This is intentionally narrow — its job is
 # to short-circuit obvious adversarial inputs before they hit the LLM. The real
@@ -68,6 +80,30 @@ def _control_char_fraction(text: str) -> float:
         if unicodedata.category(ch) == "Cc":
             bad += 1
     return bad / len(text)
+
+
+def _shannon_entropy(text: str) -> float:
+    """Shannon entropy in bits per character."""
+    if not text:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in text:
+        freq[ch] = freq.get(ch, 0) + 1
+    entropy = 0.0
+    length = len(text)
+    for count in freq.values():
+        p = count / length
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def _is_token_bomb(text: str) -> bool:
+    """Detect low-information-density input: many very short tokens."""
+    words = [w for w in text.split() if w.strip()]
+    if len(words) < TOKEN_BOMB_MIN_WORDS:
+        return False
+    avg_len = sum(len(w) for w in words) / len(words)
+    return avg_len < TOKEN_BOMB_MAX_AVG_LEN
 
 
 def sanitize(query: str) -> Tuple[str, str | None]:
@@ -109,6 +145,15 @@ def sanitize(query: str) -> Tuple[str, str | None]:
     # 5. Repetition spam
     if _REPETITION_RE.search(query):
         return "", REASON_SPAM
+
+    # 6. Entropy check (catches repetitive / low-diversity input).
+    # Only applies to longer inputs; short queries naturally have lower entropy.
+    if len(query) >= 50 and _shannon_entropy(query) < MIN_ENTROPY_BITS:
+        return "", REASON_LOW_ENTROPY
+
+    # 7. Token bomb (catches synthetic low-density input)
+    if _is_token_bomb(query):
+        return "", REASON_TOKEN_BOMB
 
     # All checks passed — NFC-normalize, trim, collapse internal whitespace.
     clean = unicodedata.normalize("NFC", query).strip()

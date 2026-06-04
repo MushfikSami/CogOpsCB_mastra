@@ -22,13 +22,12 @@ import pytest
 # =============================================================================
 
 class TestRegistryDiscovery:
-    def test_wikipedia_and_websearch_loadable(self):
+    def test_jiggasha_loadable(self):
         from cogops.tools.registry import build_tool_registry
-        schemas, tool_map = build_tool_registry(enabled=["wikipedia", "websearch"])
+        schemas, tool_map = build_tool_registry(enabled=["jiggasha"])
         names = [s["function"]["name"] for s in schemas]
-        assert "search_wikipedia" in names
-        assert "search_web" in names
-        assert len(tool_map) == 2
+        assert "search_gov_services" in names
+        assert len(tool_map) == 1
 
     def test_per_tool_configure_hook_invoked(self):
         from cogops.tools.registry import build_tool_registry

@@ -687,12 +687,12 @@ class TestConfig:
         # Instruction-based retrieval cap.
         assert cfg["tools"]["jiggasha"]["top_k_fetch"] >= 10
 
-    def test_retrieval_refusal_text_present(self):
+    def test_responses_refusal_text_present(self):
         from cogops.config.loader import load_config
         cfg = load_config()
-        assert "retrieval" in cfg
-        assert "নির্ভরযোগ্য" in cfg["retrieval"]["refusal_text_bn"]
-        assert "তথ্য" in cfg["retrieval"]["refusal_text_bn"]
+        assert "responses" in cfg
+        assert "নির্ভরযোগ্য" in cfg["responses"]["refusal_text_bn"]
+        assert "তথ্য" in cfg["responses"]["refusal_text_bn"]
 
     def test_session_section(self):
         from cogops.config.loader import load_config

@@ -61,6 +61,9 @@ Intent = Literal[
     "chitchat",
     "political_refuse",
     "personal_law_refuse",
+    "self_harm_refuse",
+    "illegal_refuse",
+    "system_probe_refuse",
 ]
 
 MAX_SUB_QUERIES = 3
@@ -112,8 +115,7 @@ _DOMAIN_RE = re.compile(
 # route to retrieval. Narrow on purpose: state-fact questions about officials
 # (PM, ministers) must NOT match.
 _HARD_POLITICAL_REFUSAL = (
-    "আওয়ামী লীগ না বিএনপি", "বিএনপি না আওয়ামী",
-    "জামায়াত দলের মার্কা", "জামায়াত বনাম",
+    "আওয়ামী লীগ না বিএনপি", "বিএনপি না আওয়ামী", "জামায়াত বনাম",
     "কোন দল ভালো", "কোন দলের", "কোন দল সমর্থন",
     "হিন্দু না মুসলিম", "কোন ধর্ম ভালো", "কোন ধর্ম সঠিক",
 )
@@ -135,6 +137,51 @@ _HARD_PERSONAL_LAW_REFUSAL = (
     # Halal/haram framings — asking the bot for religious judgment
     "হালাল না হারাম", "হারাম না হালাল", "ইসলামে অনুমতি",
     "ধর্মীয়ভাবে যাবে",
+)
+
+# Self-harm / suicide intent — narrow so legitimate crisis-helpline queries
+# ("আত্মহত্যা প্রতিরোধ হেল্পলাইন") are NOT caught.
+_HARD_SELF_HARM = (
+    "আত্মহত্যা করতে চাই",
+    "আত্মহত্যা করব",
+    "মরতে চাই",
+    "জীবন শেষ করতে চাই",
+    "নিজেকে মারতে চাই",
+    "বাঁচতে চাই না",
+)
+
+# Illegal activity — clearly criminal acts that are not government services.
+# Narrow on purpose; asking "how to report drug trafficking" is factual_govt.
+_HARD_ILLEGAL = (
+    "বোমা তৈরি",
+    "বোমা বানানো",
+    "মাদক চোরাচালান",
+    "মাদক ব্যবসা",
+    "অস্ত্র কিনতে",
+    "অস্ত্র বিক্রি",
+    "চুরি করতে",
+    "ডাকাতি করতে",
+    "খুন করতে",
+    "মানি লন্ডারিং",
+)
+
+# System-probe — attempts to extract system prompts / instructions.
+# Catches patterns that sanitize.py's regex might miss.
+_HARD_SYSTEM_PROBE = (
+    "তোমার সিস্টেম প্রম্পট",
+    "তোমার ইনস্ট্রাকশন",
+    "তোমার নির্দেশনা",
+    "system prompt",
+    "your instructions",
+    "your system prompt",
+    "ignore all previous",
+    "disregard all previous",
+    "prompt injection",
+    "jailbreak",
+    "দয়া করে তোমার সিস্টেম",
+    "তুমি কীভাবে কাজ কর",
+    "তোমার মডেল কোনটি",
+    "তোমার আলগোরিদম কী",
 )
 
 
@@ -348,6 +395,21 @@ def _hard_personal_law_match(text: str) -> bool:
     return False
 
 
+def _hard_self_harm_match(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in text or kw.lower() in lower for kw in _HARD_SELF_HARM)
+
+
+def _hard_illegal_match(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in text or kw.lower() in lower for kw in _HARD_ILLEGAL)
+
+
+def _hard_system_probe_match(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in text or kw.lower() in lower for kw in _HARD_SYSTEM_PROBE)
+
+
 def _format_history_for_router(
     history: List[Dict[str, str]],
 ) -> str:
@@ -390,7 +452,37 @@ async def route(
     if not text:
         return RouterResult(intent="chitchat", sub_queries_bengali=[], raw_query="", notes=["empty"])
 
-    # 1a. Hard personal-law / religious-judgment shortcut.
+    # 1a. Self-harm — highest priority for safety.
+    if _hard_self_harm_match(text):
+        notes.append("hard_self_harm_match")
+        return RouterResult(
+            intent="self_harm_refuse",
+            sub_queries_bengali=[],
+            raw_query=text,
+            notes=notes,
+        )
+
+    # 1b. Illegal activity.
+    if _hard_illegal_match(text):
+        notes.append("hard_illegal_match")
+        return RouterResult(
+            intent="illegal_refuse",
+            sub_queries_bengali=[],
+            raw_query=text,
+            notes=notes,
+        )
+
+    # 1c. System probe — attempts to extract system prompts.
+    if _hard_system_probe_match(text):
+        notes.append("hard_system_probe_match")
+        return RouterResult(
+            intent="system_probe_refuse",
+            sub_queries_bengali=[],
+            raw_query=text,
+            notes=notes,
+        )
+
+    # 1d. Hard personal-law / religious-judgment shortcut.
     # Checked BEFORE political so "তালাকপ্রাপ্ত পুনরায় বিয়ে যাবে কি"
     # gets the right refusal text (specialist consult) rather than the
     # political-neutrality one.
@@ -403,7 +495,7 @@ async def route(
             notes=notes,
         )
 
-    # 1b. Hard political-refusal shortcut.
+    # 1e. Hard political-refusal shortcut.
     if _hard_political_match(text):
         notes.append("hard_political_match")
         return RouterResult(

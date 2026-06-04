@@ -54,24 +54,28 @@ def _passage(pid: int, score: float, text: str, **kw) -> Dict[str, Any]:
 
 
 def _jiggasha_transport(passages: List[Dict[str, Any]]):
-    """Mock /search transport. Returns the instruction-based multi-query shape.
+    """Mock /search transport. Returns the single-query Jiggasha shape.
 
-    The single canned response is returned for any sub_queries payload.
+    The single canned response is returned for any query payload.
+    When the pipeline has multiple sub-queries, this mock is called once
+    per sub-query; the pipeline's _call_jiggasha_multi merges & deduplicates.
     """
     def handler(request: httpx.Request) -> httpx.Response:
         try:
             body = json.loads(request.content)
         except Exception:
             return httpx.Response(400, json={"error": "bad json"})
-        subs = body.get("sub_queries") or []
-        if not subs:
-            # Legacy query path — not expected in pipeline tests.
-            return httpx.Response(400, json={"error": "expected sub_queries"})
+        query = body.get("query")
+        if not query:
+            return httpx.Response(400, json={"error": "expected query"})
         return httpx.Response(200, json={
-            "sub_queries": subs,
-            "passages": passages,
+            "query": query,
+            "results": passages,
+            "hits_total": len(passages),
             "instruction": "Retrieve passages...",
             "elapsed_ms": 123,
+            "timing_ms": {},
+            "token_usage": {},
         })
     return httpx.MockTransport(handler)
 

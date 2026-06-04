@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from openai import AsyncOpenAI
 
+from cogops.prompts.time_reminder import build_time_reminder
+
 logger = logging.getLogger(__name__)
 
 Verdict = Literal["entailed", "partial", "not_entailed"]
@@ -123,6 +125,7 @@ async def verify_claims(
                 model=secondary_model,
                 messages=[
                     {"role": "system", "content": _SYSTEM},
+                    {"role": "assistant", "content": build_time_reminder()},
                     {"role": "user", "content": _build_user_prompt(valid_pairs, source_map)},
                 ],
                 response_format={"type": "json_object"},

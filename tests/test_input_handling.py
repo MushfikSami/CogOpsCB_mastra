@@ -54,13 +54,14 @@ class TestSanitizeEmpty(unittest.TestCase):
 
 class TestSanitizeLength(unittest.TestCase):
     def test_under_cap(self):
-        clean, reason = sanitize("a" * 100)
+        clean, reason = sanitize("এনআইডি কার্ড হারিয়ে গেলে কী করব?")
         self.assertIsNone(reason)
-        self.assertEqual(len(clean), 100)
+        self.assertGreater(len(clean), 10)
 
     def test_at_cap(self):
-        # repeating 'ab' avoids the >100 single-char-run spam detector
-        s = ("ab" * (MAX_QUERY_CHARS // 2))
+        # Use realistic long Bengali text to avoid triggering entropy check.
+        sentence = "বাংলাদেশের সরকারি সেবা সম্পর্কে জানতে চাই। "
+        s = (sentence * (MAX_QUERY_CHARS // len(sentence) + 1))[:MAX_QUERY_CHARS]
         clean, reason = sanitize(s)
         self.assertIsNone(reason)
 
@@ -182,14 +183,16 @@ class TestRouterNoClientFallback(unittest.TestCase):
 
 
 class TestRouterHardRefusal(unittest.TestCase):
-    def test_party_comparison_short_circuits(self):
+    def test_party_symbol_is_factual_not_political(self):
+        # "What is Jamaat's party symbol?" is a factual info question,
+        # not a political comparison/judgment.
         r = asyncio.run(route(
             "জামায়াত দলের মার্কা কী?",
             secondary_client=None,
             secondary_model="",
         ))
-        self.assertEqual(r.intent, "political_refuse")
-        self.assertEqual(r.sub_queries_bengali, [])
+        self.assertEqual(r.intent, "factual_govt")
+        self.assertEqual(r.sub_queries_bengali, ["জামায়াত দলের মার্কা কী?"])
 
     def test_state_fact_not_political(self):
         # "Who is the prime minister?" must NOT trip the hard political match.
