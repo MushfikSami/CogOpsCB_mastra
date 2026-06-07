@@ -110,32 +110,6 @@ _HARD_SYSTEM_PROBE = (
     "তোমার আলগোরিদম কী",
 )
 
-_HARD_POLITICAL = (
-    "আওয়ামী লীগ না বিএনপি",
-    "বিএনপি না আওয়ামী",
-    "জামায়াত দলের মার্কা",
-    "জামায়াত বনাম",
-    "কোন দল ভালো",
-    "কোন দলের",
-    "কোন দল সমর্থন",
-    "হিন্দু না মুসলিম",
-    "কোন ধর্ম ভালো",
-    "কোন ধর্ম সঠিক",
-)
-
-_HARD_BLASPHEMY = (
-    "ধর্ম অবমাননা",
-    "নবীকে গালি",
-    "ঈশ্বরকে গালি",
-    "আল্লাহকে গালি",
-)
-
-_HARD_PERSONAL_ATTACK = (
-    "চোর",
-    "দুর্নীতিবাজ",
-    "খুনি",
-)
-
 # Domain vocabulary — matching this forces factual regardless of LLM verdict.
 _DOMAIN_VOCAB = (
     "পাসপোর্ট", "passport", "এনআইডি", "NID", "জাতীয় পরিচয়", "পরিচয়পত্র",
@@ -200,8 +174,27 @@ INTENT DEFINITIONS:
   User: "পাসপোর্ট ফি কত? এনআইডি সংশোধন কোথায় করব?"
   → sub_queries: ["পাসপোর্ট আবেদন ফি কত", "এনআইডি সংশোধন কেন্দ্র কোথায়"]
 
-GUARD RAIL RULES:
-- State facts ("Who is the foreign minister?") are NEVER harmful — they are factual.
+GUARD RAIL RULES — INTENT MATTERS, NOT WORDS:
+The PRESENCE of a word does NOT determine intent. A query containing "আওয়ামী লীগ",
+"বিএনপি", "হিন্দু", "মুসলিম", or "চোর" can be factual OR harmful depending on what
+the user is actually asking.
+
+- Factual (NEVER harmful): "আওয়ামী লীগ কখন প্রতিষ্ঠিত হয়?" — asks a historical date.
+- Harmful (political_comparison): "আওয়ামী লীগ না বিএনপি কোনটি ভালো?" — asks for judgment.
+- Factual (NEVER harmful): "হিন্দু ধর্মে বিবাহ পদ্ধতি কী?" — asks a religious procedure.
+- Harmful (religious_blasphemy): "হিন্দু না মুসলিম কোন ধর্ম ভালো?" — asks for religious comparison/judgment.
+- Factual (NEVER harmful): "মন্ত্রী X-এর বিরুদ্ধে কী অভিযোগ উঠেছে?" — asks reported allegations.
+- Harmful (personal_attack): "মন্ত্রী X চোর" — makes an unsubstantiated accusation.
+- Factual (NEVER harmful): "জামায়াত দলের নির্বাচনী প্রতীক কী?" — asks a registered party fact.
+- Harmful (political_comparison): "জামায়াত না বিএনপি কোনটি সঠিক?" — asks for political judgment.
+
+General principle:
+- Questions SEEKING INFORMATION (who, what, when, where, how, is there) → factual.
+- Requests for JUDGMENT, COMPARISON, or OPINION (which is better, who is right, do you support) → harmful.
+- Direct ACCUSATIONS or INSULTS without question structure → harmful.
+
+Additional rules:
+- State facts ("Who is the foreign minister?") are NEVER harmful.
 - Asking "how to report drug trafficking" is factual, not illegal.
 - Religious procedural questions ("how to register marriage at Kazi office") are factual, not blasphemy.
 
@@ -229,10 +222,6 @@ Output ONLY the JSON object. No markdown fences, no prose."""
 def _hard_match(text: str, keywords: tuple[str, ...]) -> bool:
     lower = text.lower()
     return any(kw in text or kw.lower() in lower for kw in keywords)
-
-
-def _hard_political_match(text: str) -> bool:
-    return _hard_match(text, _HARD_POLITICAL)
 
 
 def _extract_usage(resp: Any) -> Optional[Dict[str, int]]:
@@ -305,27 +294,6 @@ class IntentClassifier:
                 guard_rail_triggered=True,
                 guard_rail_category="system_probe",
                 notes=["hard_system_probe_match"],
-            )
-        if _hard_match(text, _HARD_BLASPHEMY):
-            return IntentResult(
-                intent="harmful",
-                guard_rail_triggered=True,
-                guard_rail_category="religious_blasphemy",
-                notes=["hard_blasphemy_match"],
-            )
-        if _hard_match(text, _HARD_PERSONAL_ATTACK):
-            return IntentResult(
-                intent="harmful",
-                guard_rail_triggered=True,
-                guard_rail_category="personal_attack",
-                notes=["hard_personal_attack_match"],
-            )
-        if _hard_political_match(text):
-            return IntentResult(
-                intent="harmful",
-                guard_rail_triggered=True,
-                guard_rail_category="political_comparison",
-                notes=["hard_political_match"],
             )
         return None
 

@@ -26,12 +26,15 @@ from cogops.agents.composer_agent import ComposerAgent, PostFlightVerifier
 from cogops.agents.input_guard import GuardConfig, InputGuard
 from cogops.agents.intent_classifier import IntentClassifier, IntentResult
 from cogops.agents.query_processor import QueryProcessor
+from cogops.agents.react_collector import ReActCollector
 from cogops.agents.retrieval_agent import RetrievalAgent, RetrievalConfig
 from cogops.config.loader import _load_endpoint_config
 from cogops.llm.clients import AsyncLLMService
 from cogops.prompts.messages import SERVER_LOAD_FALLBACK_BN
+from cogops.prompts.system import get_system_prompt
 from cogops.prompts.time_reminder import build_time_reminder
 from cogops.session.redis_store import RedisSessionStore
+from cogops.tools.registry import ToolContext, build_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,8 @@ def _build_date_answer(query: str) -> str:
 
 class Orchestrator:
     """One per user_id. Holds all agents, LLM clients, and Redis store."""
+
+    _cached_system_prompt: Optional[str] = None
 
     def __init__(self, config_path: str = "configs/config.yml"):
         logger.info("Initializing CogOpsCB Orchestrator…")
@@ -162,12 +167,34 @@ class Orchestrator:
             max_concurrent_query=ic_cfg.get("max_concurrent_query", 3),
         )
 
-        # Agent 3: RetrievalAgent
+        # Agent 3: RetrievalAgent (legacy) + ReActCollector (refinement)
         self.retrieval_agent = RetrievalAgent(
             cfg=self._build_retrieval_config(),
             secondary_client=self.secondary_service.client_llm,
             secondary_model=self.secondary_service.model,
         )
+        pipe_cfg = self.config.get("pipeline", {}) or {}
+        self.use_react_collector = bool(pipe_cfg.get("use_react_collector", False))
+        if self.use_react_collector:
+            rc_cfg = pipe_cfg.get("react_collector", {}) or {}
+            self.react_collector = ReActCollector(
+                primary_client=self.llm_service.client_llm,
+                primary_model=self.llm_service.model,
+                max_turns=int(rc_cfg.get("max_turns", 2)),
+                tool_top_k=int(rc_cfg.get("tool_top_k", 25)),
+                tool_min_score=float(rc_cfg.get("tool_min_score", 0.35)),
+                timeout_seconds=float(rc_cfg.get("timeout_seconds", 15.0)),
+                min_passages_to_stop_early=int(rc_cfg.get("min_passages_to_stop_early", 3)),
+                stream_progress=bool(rc_cfg.get("stream_progress", True)),
+            )
+            logger.info(
+                "ReActCollector enabled in REFINEMENT mode (max_turns=%d, tool_top_k=%d, trigger_if_lt=%d)",
+                rc_cfg.get("max_turns", 2),
+                rc_cfg.get("tool_top_k", 25),
+                rc_cfg.get("min_passages_to_stop_early", 3),
+            )
+        else:
+            self.react_collector = None
 
         # Agent 4: ComposerAgent
         pipe_cfg = self.config.get("pipeline", {}) or {}
@@ -192,10 +219,39 @@ class Orchestrator:
             refusal_text_bn=self.refusal_text,
         )
 
+        # Tool registry (test compatibility)
+        tools_cfg = self.config.get("tools", {}) or {}
+        enabled_tools = tools_cfg.get("enabled", [])
+        self.tools_schema, self.raw_tool_map = build_tool_registry(
+            enabled=enabled_tools,
+            tool_configs=tools_cfg,
+        )
+
+        # Test-compatibility attributes
+        reasoning_cfg = self.config.get("reasoning", {}) or {}
+        self.max_turns = 3
+        self.max_concurrent_query = int(reasoning_cfg.get("max_concurrent_query", 2))
+
         logger.info(
             "Orchestrator ready. agents=[guard,classifier,processor,retrieval,composer,verifier] "
             "primary=%s secondary=%s",
             self.llm_service.model, self.secondary_service.model,
+        )
+
+    @property
+    def system_prompt(self) -> str:
+        if Orchestrator._cached_system_prompt is None:
+            Orchestrator._cached_system_prompt = get_system_prompt(
+                agent_name=self.agent_name,
+            )
+        return Orchestrator._cached_system_prompt
+
+    def _build_tool_context(self, user_id: str) -> ToolContext:
+        return ToolContext(
+            user_id=user_id,
+            store=self.redis_store,
+            tool_map=self.raw_tool_map,
+            tools_schema=self.tools_schema,
         )
 
     # ------------------------------------------------------------------

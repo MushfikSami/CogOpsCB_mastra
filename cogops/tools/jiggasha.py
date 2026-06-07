@@ -154,9 +154,14 @@ async def handler(query: str, ctx: ToolContext) -> Tuple[str, List[Dict[str, Any
     telemetry_sources: List[Dict[str, Any]] = []
 
     for r in surviving:
+        pid = r.get("passage_id")
+        # Skip duplicates across turns in the same request
+        if pid is not None and ctx.has_passage(pid):
+            continue
+
         payload = {
             "tool": NAME,
-            "passage_id": r.get("passage_id"),
+            "passage_id": pid,
             "category": r.get("category", ""),
             "sub_category": r.get("sub_category", ""),
             "service": r.get("service", ""),
@@ -165,6 +170,8 @@ async def handler(query: str, ctx: ToolContext) -> Tuple[str, List[Dict[str, Any
             "score": float(r.get("score", 0.0)),
         }
         tag = ctx.allocate_source_tag(payload)
+        if pid is not None:
+            ctx.mark_passage(pid)
         formatted_blocks.append(_format_passage_for_model(tag, payload))
         telemetry_sources.append({"tag": tag, **payload})
 

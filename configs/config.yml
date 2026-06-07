@@ -74,6 +74,14 @@ tools:
 
 # --- Retrieval Agent (Layer 3) ---
 pipeline:
+  use_react_collector: true
+  react_collector:
+    max_turns: 2
+    tool_top_k: 25
+    tool_min_score: 0.35
+    timeout_seconds: 15.0
+    min_passages_to_stop_early: 3
+    stream_progress: true
   retrieval:
     max_react_iterations: 2
     merge_global_cap: 50

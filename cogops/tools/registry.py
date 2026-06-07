@@ -36,6 +36,7 @@ class ToolContext:
     user_id: Optional[str] = None
     store: Optional[Any] = None                                   # RedisSessionStore / InMemoryStore
     source_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # {"S1": {...}, "S2": {...}}
+    seen_passage_ids: set = field(default_factory=set)            # dedup across turns
     tool_map: Optional[Any] = None                                # reserved
     tools_schema: Optional[Any] = None                            # reserved
 
@@ -49,6 +50,15 @@ class ToolContext:
         tag = f"S{next_num}"
         self.source_map[tag] = payload
         return tag
+
+    def has_passage(self, passage_id: Any) -> bool:
+        """Check if a passage_id has already been seen in this turn."""
+        return passage_id in self.seen_passage_ids
+
+    def mark_passage(self, passage_id: Any) -> None:
+        """Mark a passage_id as seen."""
+        if passage_id is not None:
+            self.seen_passage_ids.add(passage_id)
 
 
 def build_tool_registry(

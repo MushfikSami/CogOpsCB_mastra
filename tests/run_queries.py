@@ -75,7 +75,7 @@ DEFAULT_SUBSET = [
 
 def load_queries() -> List[str]:
     """Load user_query_examples.md as one-query-per-non-blank-line."""
-    p = REPO / "user_query_examples.md"
+    p = REPO / "data" / "user_query_examples.md"
     lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()]
     return [ln for ln in lines if ln]  # drop blanks
 

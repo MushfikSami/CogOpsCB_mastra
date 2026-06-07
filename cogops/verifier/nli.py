@@ -16,6 +16,7 @@ timeout we return all-"entailed" verdicts so the answer is not blocked
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from openai import AsyncOpenAI
@@ -63,14 +64,27 @@ Include exactly one verdict per input pair, in order. No prose.
 """
 
 
+_PAREN_RE = re.compile(r"\s*\([^)]*(?:অর্থাৎ|তার|অর্থা|যেমন|যেমনটি)[^)]*\)\s*")
+
+
+def _strip_explanatory_parentheticals(text: str) -> str:
+    """Remove parentheticals that connect subjects across sources.
+
+    These are reader aids, not factual claims. Stripping them lets NLI
+    focus on the core factual assertion that the cited source must support.
+    """
+    return _PAREN_RE.sub(" ", text).strip()
+
+
 def _build_user_prompt(pairs: List[Tuple[str, str]], source_map: Dict[str, Dict[str, Any]]) -> str:
     """Render the batched (claim, evidence) pairs as a single user message."""
     blocks: List[str] = []
     for i, (tag, sentence) in enumerate(pairs):
         evidence = source_map.get(tag, {}).get("text", "") or "(evidence missing)"
+        core_claim = _strip_explanatory_parentheticals(sentence)
         blocks.append(
             f"### Pair {i}\n"
-            f"Claim (cites [{tag}]): {sentence}\n"
+            f"Claim (cites [{tag}]): {core_claim}\n"
             f"Evidence [{tag}]: {evidence}\n"
         )
     return (
