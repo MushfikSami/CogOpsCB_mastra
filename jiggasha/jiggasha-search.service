@@ -1,0 +1,39 @@
+# /etc/systemd/system/jiggasha-search.service
+#
+# Systemd unit for the Jiggasha Bengali passage retrieval service
+# (embed + Qdrant + LLM rerank). Listens on :10000 by default.
+#
+# This service is a hard prerequisite for govtchat.service.
+
+[Unit]
+Description=Jiggasha Bengali Passage Retrieval Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vpa
+Group=vpa
+
+WorkingDirectory=/home/vpa/CogOpsCB/jiggasha
+
+EnvironmentFile=/home/vpa/CogOpsCB/jiggasha/.env
+Environment=HOME=/home/vpa
+Environment=VIRTUAL_ENV=/home/vpa/miniconda3
+Environment=PATH=/home/vpa/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONPATH=/home/vpa/CogOpsCB/jiggasha
+
+ExecStart=/home/vpa/miniconda3/bin/python3 service.py
+
+Restart=always
+RestartSec=10
+
+# Give qdrant + embedder time to respond on the first request after boot
+TimeoutStartSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jiggasha
+
+[Install]
+WantedBy=multi-user.target

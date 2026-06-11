@@ -1,0 +1,123 @@
+# ===================================================================
+# CogOpsCB — Production Chatbot Configuration
+# ===================================================================
+
+# --- Agent Identity ---
+agent:
+  name: "আশা"
+  story: "আমি বাংলাদেশ সরকারের নাগরিকদের জন্য একটি ডিজিটাল সহকারী। আমি সরকারি সেবা, নিয়মাবলি, ও প্রক্রিয়া সংক্রান্ত তথ্য খুঁজে এনে প্রমিত বাংলায় উপস্থাপন করি। আমার কোনো রাজনৈতিক দল বা ধর্মীয় মতাদর্শ নেই।"
+
+# --- Primary LLM (Composer, 256K context) ---
+llm:
+  api_key_env: "LLM_API_KEY"
+  model_name_env: "LLM_MODEL_NAME"
+  base_url_env: "LLM_BASE_URL"
+  max_context_tokens: 256000
+
+# --- Secondary LLM (IntentClassifier + QueryProcessor + RetrievalJudge + NLI) ---
+secondary:
+  api_key_env: "SECONDARY_API_KEY"
+  model_name_env: "SECONDARY_MODEL_NAME"
+  base_url_env: "SECONDARY_BASE_URL"
+  max_context_tokens: 128000
+
+# --- Session / Redis ---
+session:
+  redis_url_env: "REDIS_URL"
+  redis_url_default: "redis://localhost:6379/0"
+  ttl_seconds_env: "REDIS_SESSION_TTL_SECONDS"
+  ttl_default: 86400
+  query_log_path: "data/query_log.jsonl"
+  query_log_retention_days: 10
+
+# --- Input Guard (Layer 0) ---
+input_guard:
+  max_chars: 4096
+  max_tokens: 1024
+  max_repeated_char_run: 100
+  control_char_threshold: 0.10
+  entropy_threshold: 1.5
+  entropy_min_length: 50
+  token_bomb_min_words: 12
+  token_bomb_max_avg_len: 2.0
+
+# --- Intent Classifier (Layer 1) ---
+intent_classifier:
+  temperature: 0.0
+  max_tokens: 512
+  timeout_seconds: 5.0
+  history_turns: 5
+  max_concurrent_query: 3
+
+# --- Query Processing (Layer 2) ---
+query_processing:
+  disambiguator:
+    temperature: 0.0
+    max_tokens: 256
+    timeout_seconds: 4.0
+  formalizer:
+    temperature: 0.1
+    max_tokens: 256
+    timeout_seconds: 4.0
+
+# --- Tools (Jiggasha is the sole retrieval source) ---
+tools:
+  enabled: [jiggasha]
+  jiggasha:
+    endpoint_env: "JIGGASHA_ENDPOINT"
+    timeout_seconds: 45
+    use_instruction: true
+    top_k_fetch: 100
+    cosine_threshold: 0.50
+    token_budget: 28000
+    # rerank_threshold: removed — Jiggasha no longer uses a reranker
+
+# --- Retrieval Agent (Layer 3) ---
+pipeline:
+  use_react_collector: true
+  react_collector:
+    max_turns: 2
+    tool_top_k: 25
+    tool_min_score: 0.35
+    timeout_seconds: 15.0
+    min_passages_to_stop_early: 3
+    stream_progress: true
+  retrieval:
+    max_react_iterations: 2
+    merge_global_cap: 50
+    judge_temperature: 0.0
+    judge_max_tokens: 128
+    judge_timeout_seconds: 5.0
+  composer:
+    temperature: 0.1
+    top_p: 0.95
+    max_tokens: 2048
+  disambiguation:
+    min_distinct_services: 2
+    short_query_token_cap: 8
+    candidate_cap: 6
+
+# --- Refusal / static response templates ---
+responses:
+  refusal_text_bn: "দুঃখিত, এই প্রশ্নের জন্য নির্ভরযোগ্য সরকারি তথ্য পাওয়া যায়নি।"
+  political_refusal_text_bn: "আমি একটি নিরপেক্ষ সরকারি সেবা সহকারী। রাজনৈতিক তুলনা বা মতামত দেওয়া আমার পক্ষে সম্ভব নয়।"
+  personal_law_refusal_text_bn: "এই প্রশ্নটি ব্যক্তিগত আইন বা ধর্মীয় বিধানের পরামর্শের বিষয়। সঠিক উত্তরের জন্য সংশ্লিষ্ট বিশেষজ্ঞের সাথে পরামর্শ করুন।"
+  self_harm_refusal_text_bn: "আমি আপনাকে এই মুহূর্তে সাহায্য করতে পারব না। অনুগ্রহ করে ৯৯৯ বা নিকটতম হাসপাতালে যোগাযোগ করুন।"
+  illegal_refusal_text_bn: "এই ধরনের কার্যকলাপ সম্পর্কে তথ্য দেওয়া আমার পক্ষে সম্ভব নয়।"
+  input_invalid_refusal_bn: "দুঃখিত, প্রশ্নটি বোঝা গেল না বা সীমার বাইরে। অনুগ্রহ করে স্পষ্ট, সংক্ষিপ্ত প্রশ্ন করুন।"
+  chitchat_greeting_bn: "স্বাগতম! আমি বাংলাদেশ সরকারের সেবা সম্পর্কিত প্রশ্নে সাহায্য করতে পারি — যেমন এনআইডি, পাসপোর্ট, ট্যাক্স, সনদ, ইত্যাদি। আপনি কোন বিষয়ে জানতে চান?"
+  system_probe_response_bn: "আমি বাংলাদেশ সরকারের ডিজিটাল সহকারী 'আশা'। আমার কাজ নাগরিকদের সরকারি সেবা সংক্রান্ত তথ্য সহজভাবে বাংলায় পৌঁছে দেওয়া।"
+  ambiguous_clarification_prefix: "আপনার প্রশ্নটি একাধিক বিষয় জড়িত বোধ হচ্ছে। অনুগ্রহ করে নিচ থেকে নির্বাচন করুন অথবা আরও স্পষ্ট করে জানান:"
+
+# --- NLI Verifier (Layer 5) ---
+verifier:
+  enabled: true
+  policy: redact
+  timeout_seconds: 6
+  source_dedup_enabled: true
+  url_health_check_enabled: false
+
+# --- Legacy (retained for test compat, not used by new pipeline) ---
+reasoning:
+  max_turns: 1
+  max_concurrent_query: 2

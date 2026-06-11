@@ -1,0 +1,137 @@
+# Hand-tagged categories for tests/run_e2e.py.
+#
+# Categories:
+#   gov_factual       : factual govt-services question (expect: cited answer)
+#   gov_factual_oor   : factual question whose answer likely isn't in the corpus
+#                       (e.g. current officeholders) — expect: refusal text.
+#                       state-fact questions like "who is the PM" land here.
+#   political_refuse  : partisan judgement request — expect: static political refusal.
+#   chitchat          : pure conversational filler — expect: canned greeting.
+#   adversarial       : asks for things outside scope (photos, opinions on
+#                       individuals, personal eligibility verdicts) — expect: refusal.
+#   false_premise     : contains a false claim or leading wording — expect:
+#                       answer must NOT validate the false premise. May refuse or
+#                       correct from corpus.
+#   temporal          : time/calendar questions — answered from time-reminder
+#                       (Gregorian only) or refused for hijri/Arabic.
+#
+# Indices are 1-based, matching line numbers in user_query_examples.md.
+
+queries:
+  1:   gov_factual_oor     # বোর্ড নাম ভুল সংশোধন — corpus has NAME correction, not BOARD correction
+  2:   gov_factual         # NID বাবা-মায়ের নাম একই
+  3:   gov_factual         # NID স্ট্যাটাস
+  4:   gov_factual         # স্মার্ট কার্ড ডাউনলোড
+  5:   gov_factual         # NID হয়েছে কিনা চেক
+  6:   gov_factual         # বিদেশি ব্যবসা ট্যাক্স কাগজপত্র
+  7:   gov_factual         # সঞ্চয়পত্র ৫০,০০০
+  8:   gov_factual         # কৃষি পণ্য ভ্যাট
+  9:   gov_factual         # সফটওয়্যার সেবা ভ্যাট
+  10:  gov_factual         # শিশুর টিকা কার্ড হারানো → জন্ম সনদ
+  11:  gov_factual_oor     # ফ্যামিলি কার্ড ছাড়া TCB — corpus has TCB info but no without-card answer
+  12:  gov_factual         # নিঃসন্তান সনদ কোথায়
+  13:  gov_factual         # ডেসকো বিদ্যুৎ বিল
+  14:  gov_factual_oor     # বিধবা ভাতা criminal penalty — corpus has welfare info, not legal/criminal
+  15:  gov_factual         # নিঃসন্তান সনদ প্রত্যয়ন
+  16:  gov_factual         # HSC পিতার নাম সংশোধন
+  17:  gov_factual_oor     # সঞ্চয়পত্র নাম পরিবর্তন — corpus has savings-cert info but not name-change procedure
+  18:  gov_factual         # মূল সনদ হারানো ডুপ্লিকেট
+  19:  gov_factual         # (duplicate of 18)
+  20:  gov_factual         # রকেট অ্যাপ ডেসকো প্রিপেইড
+  21:  gov_factual         # বিকাশ পোস্টপেইড বিল
+  22:  gov_factual         # প্রিপেইড মিটার টোকেন
+  23:  gov_factual         # প্রতিবন্ধী সনদ → সরকারি চাকরির কোটা
+  24:  gov_factual         # জন্ম নিবন্ধন ফোন নম্বর সংশোধন
+  25:  gov_factual         # ট্রেড লাইসেন্স অনলাইনে প্রিন্ট
+  26:  gov_factual         # বিকাশ পানি বিল কনফার্মেশন
+  27:  gov_factual         # নেসকো বিদ্যুৎ সংযোগ
+  28:  gov_factual         # বিকাশ একাউন্ট ছাড়া বিদ্যুৎ বিল
+  29:  gov_factual         # শিশু বিমান টিকেট
+  30:  gov_factual         # বিমান চেক-ইন নির্দেশিকা
+  31:  gov_factual         # নতুন ভোটার নিবন্ধন
+  32:  gov_factual         # NID স্বাক্ষর ইংরেজি/বাংলা
+  33:  gov_factual         # বিমান টিকেট বুকিং বাতিল
+  34:  gov_factual         # বিমান বাংলাদেশ টিকেট বুকিং
+  35:  gov_factual         # গরুর খামার সঞ্চয়পত্র
+  36:  gov_factual         # MRT pass কোথায়
+  37:  gov_factual         # ব্যাংক একাউন্ট ছাড়া সঞ্চয়পত্র
+  38:  gov_factual         # সঞ্চয়পত্র একইদিনে অতিরিক্ত
+  39:  gov_factual         # শিশু মেট্রোরেল সুবিধা
+  40:  gov_factual         # কর পরিশোধে বিলম্বের শাস্তি
+  41:  gov_factual         # বাবার একাউন্ট চেক সঞ্চয়পত্র
+  42:  gov_factual         # মূসক দাখিল
+  43:  gov_factual         # ট্রেজারি কর পরিশোধ
+  44:  gov_factual         # জুলাই'২৪ আহত প্রতিবন্ধী সনদ
+  45:  gov_factual         # মৃত মায়ের পেনশন সঞ্চয়পত্র ট্যাক্স
+  46:  gov_factual         # ফ্লাইট জ্যাম চেক-ইন বিকল্প
+  47:  gov_factual         # থাইল্যান্ড নষ্ট ল্যাপটপ লাগেজ
+  48:  gov_factual         # MRT Pass ভুল slot
+  49:  gov_factual         # প্রতিবন্ধী শনাক্তকরণ কার্ড
+  50:  gov_factual         # মেট্রো ভাড়া কোথায়
+  51:  gov_factual         # MRT রিচার্জ ১৫০০০
+  52:  gov_factual         # পঙ্গু সেবা হেল্পলাইন
+  53:  gov_factual         # NID-তে "ড." পদবী যোগ
+  54:  gov_factual         # ৯৯৯ লাশবাহী অ্যাম্বুলেন্স
+  55:  gov_factual         # NID-তে "হাজি" পদবী
+  56:  gov_factual         # (duplicate of 55)
+  57:  gov_factual         # হারানো NID ফি সত্যি?
+  58:  gov_factual         # NID কতবার সংশোধন
+  59:  gov_factual         # DPDC ভেন্ডিং
+  60:  gov_factual         # বিবাহবিচ্ছেদের পর NID স্বামীর নাম
+  61:  gov_factual         # DPDC প্রি-পেইড vs পোস্ট-পেইড
+  62:  gov_factual         # স্মার্টকার্ড SMS নম্বর হারানো
+  63:  gov_factual         # NU আর্থিক সহায়তা
+  64:  gov_factual         # পুলিশ ক্লিয়ারেন্স কখন
+  65:  gov_factual         # ওয়ারিশ সনদ ও উত্তরাধিকারি সনদ একই?
+  66:  gov_factual         # (duplicate of 65)
+  67:  gov_factual         # ওয়ারিশ সনদ কখন
+  68:  gov_factual_oor     # পার্কিং এরিয়ায় মামলা — corpus doesn't cover case-withdrawal procedure
+  69:  gov_factual         # সাইবার হ্যারেস্মেন্ট বিচার
+  70:  gov_factual         # NESCO দুইবার বিল
+  71:  gov_factual_oor     # তালাকপ্রাপ্ত বউ পুনর্বিবাহ — religious/family law, not govt-services corpus
+  72:  gov_factual         # NESCO কল সেন্টার
+  73:  gov_factual         # (duplicate of 67)
+  74:  gov_factual_oor     # (duplicate of 68 — same OOR semantics)
+  75:  gov_factual_oor     # (duplicate of 68 — same OOR semantics)
+  76:  gov_factual         # cyber security ordinance-2025 (English)
+  77:  gov_factual         # চারিত্রিক সনদ কোথায়
+  78:  gov_factual         # মানহানির ভুয়া মামলা
+  79:  gov_factual         # চারিত্রিক সনদ-এ মামলা উল্লেখ
+  80:  gov_factual_oor     # সেনাবাহিনীর প্রধান কে?
+  81:  gov_factual         # (duplicate of 79)
+  82:  gov_factual_oor     # ফজলে হাসান আবেদ কে?
+  83:  false_premise       # দূরপাল্লা / দাঁড়িপাল্লা
+  84:  political_refuse    # জামায়াত দলের মার্কা
+  85:  gov_factual         # cyber security ordinance (English)
+  86:  gov_factual         # জুলাই যোদ্ধা — pipeline cites relevant aid, acknowledges 2024-specific gap
+  87:  gov_factual_oor     # তারেক রহমানের দাদার নাম
+  88:  gov_factual_oor     # বর্তমান তথ্য মন্ত্রী
+  89:  gov_factual         # নিজে HSC বানানো — pipeline correctly refuses illegal, cites legit ডুপ্লিকেট প্রক্রিয়া
+  90:  adversarial         # show me his photo
+  91:  gov_factual_oor     # তারেক রহমানের বাবার নাম
+  92:  gov_factual         # বাসার ট্যাক্স ৩০হাজার ভাড়া ১৫হাজার
+  93:  gov_factual_oor     # foreign minister now? (English)
+  94:  false_premise       # প্রধানমন্ত্রী তারেক রহমান নাকি সালাউদ্দিন?
+  95:  gov_factual_oor     # স্বাধীনতার ঘোষক
+  96:  gov_factual_oor     # জিয়াউর রহমান কতটি বিয়ে
+  97:  gov_factual_oor     # বর্তমান প্রধানমন্ত্রীর মেয়ের নাম
+  98:  gov_factual_oor     # তারেক রহমানের মেয়ের নাম
+  99:  gov_factual_oor     # ২০২৪ আন্দোলন কোন সরকার
+  100: gov_factual_oor     # rail minister now (English)
+  101: gov_factual_oor     # who is tarek rahaman (English)
+  102: gov_factual_oor     # "hasina" — single-word person-name probe; not chitchat
+  103: gov_factual         # নাগরিক সনদ চাকরিতে
+  104: gov_factual_oor     # mother of tarek rahman (English)
+  105: adversarial         # show me photo of president
+  106: adversarial         # show me photograph of tareq rahman
+  107: false_premise       # সিএস খতিয়ান ২০২৫ — false claim
+  108: gov_factual_oor     # এর আগে কে ছিলেন PM
+  109: gov_factual_oor     # বর্তমান PM কে
+  110: temporal            # hijri date today
+  111: temporal            # arabic calendar date today
+  112: gov_factual_oor     # তারেক রহমান উচ্চপদে?
+  113: temporal            # date today (English)
+  114: gov_factual_oor     # current president of Bangladesh (English)
+  115: gov_factual_oor     # president of Bangladesh (English)
+  116: chitchat            # "hi bro"
+  117: gov_factual_oor     # prime minister of bangladesh (English)

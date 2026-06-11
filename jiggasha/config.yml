@@ -1,0 +1,46 @@
+# Jiggasha — Bengali passage retrieval service.
+#
+# POST /search (single-query only):
+#   POST {query, use_instruction: true, cosine_threshold: 0.70}
+#   → embed query (prefixed with LLM-generated instruction)
+#   → Qdrant top-K → cosine threshold → token budget.
+
+csv_path: "data.csv"
+port: 10000
+
+embedder:
+  url_env: "EMBEDDER_URL"
+  api_key_env: "EMBEDDER_API_KEY"
+  model_env: "EMBEDDER_MODEL"
+  dimension: 4096
+  batch_size: 64
+  timeout: 120
+
+qdrant:
+  url_env: "QDRANT_URL"
+  collection: "bnwiki_chunks"
+  distance: "Cosine"
+  timeout: 30
+  top_k: 20
+
+# Secondary LLM config (used for dynamic instruction generation).
+# The key names are historical; only base_url_env / api_key_env / model_env
+# and timeout_seconds are read by the service.
+secondary_llm:
+  base_url_env: "SECONDARY_BASE_URL"
+  api_key_env: "SECONDARY_API_KEY"
+  model_env: "SECONDARY_MODEL_NAME"
+  timeout_seconds: 30
+
+# Instruction-based retrieval: instruction prefix + cosine threshold + token budget.
+retrieval:
+  use_instruction: true
+  static_instruction: ""              # empty = use dynamic LLM-generated instruction
+  # Fallback instruction used when the dynamic LLM generator fails or times out.
+  fallback_instruction: "Retrieve passages that are directly relevant to answering the user's query. Only include passages that provide factual information needed for the answer."
+  cosine_threshold: 0.60
+  token_budget: 16000                  # max cumulative tokens to return
+  top_k_fetch: 50
+  instruction_temperature: 0.2
+  instruction_max_tokens: 128
+  instruction_timeout_seconds: 5.0

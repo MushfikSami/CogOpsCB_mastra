@@ -1,0 +1,28 @@
+"""
+cogops/events/channels.py
+
+Channel filtering helpers for the streaming event bus.
+
+Every event yielded by the reasoning loop carries a `channel` field:
+- "user"  : visible to the user only
+- "debug" : visible to debug observers only
+- "both"  : visible to both
+"""
+
+from typing import Iterable, Dict, Any
+
+
+def filter_for_user(events: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
+    """Yield only events visible to the user (channel=user or channel=both)."""
+    for evt in events:
+        ch = evt.get("channel", "user")
+        if ch in ("user", "both"):
+            yield evt
+
+
+def filter_for_debug(events: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
+    """Yield only debug-visible events (channel=debug or channel=both)."""
+    for evt in events:
+        ch = evt.get("channel", "user")
+        if ch in ("debug", "both"):
+            yield evt

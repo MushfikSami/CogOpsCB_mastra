@@ -143,7 +143,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+.vscode/
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -208,3 +208,13 @@ __marimo__/
 debug*
 unstable/no_vector_rag_PageIndex/
 ingestion/graphiti_graph/.ingestion_pids/
+
+evaluation/*
+data/*
+dockers/redis/data/*
+workspace/*
+ingestion/dataexplore/
+dockers/*
+claude.md
+jiggasha/wiki_chunks/
+jiggasha/data_exp/
