@@ -1,0 +1,30 @@
+{
+  "name": "cogops-mastra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mastra sidecar service for CogOpsCB — 6-agent orchestrator with LibSQL-backed working + observational memory.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^1.3.0",
+    "@mastra/core": "^0.10.0",
+    "@mastra/libsql": "^0.10.0",
+    "@mastra/memory": "^0.10.0",
+    "ai": "^4.3.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

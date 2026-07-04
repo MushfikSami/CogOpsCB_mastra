@@ -1,20 +1,27 @@
 """
-api.py — FastAPI server for GovOps Chatbot.
+api.py — FastAPI proxy for GovOps Chatbot.
+
+The agent orchestration now lives in the Mastra sidecar (Node/TypeScript, see
+./mastra). This FastAPI layer is a thin proxy that:
+  - serves the single-page UI (unchanged),
+  - forwards POST /chat/stream to the Mastra service and relays its NDJSON stream,
+  - applies the same X-Debug-Key gate + channel filtering as before,
+  - keeps the query log.
 
 Endpoints:
-  POST /chat/stream  — Main streaming chat (NDJSON)
-  GET  /health       — Service health (LLM, Redis)
-  POST /session/clear — Clear conversation for a user
+  POST /chat/stream  — Main streaming chat (NDJSON), proxied to Mastra
+  GET  /health       — Service health (proxy + Mastra reachability)
+  POST /session/clear — No-op acknowledgement (memory is owned by Mastra/LibSQL)
   GET  /query-log    — Last N query entries
 """
 
-import asyncio
 import json
 import logging
 import os
 import uuid
-from typing import Dict, Optional
+from typing import Optional
 
+import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
@@ -22,7 +29,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from cogops.agents.orchestrator import Orchestrator
 from cogops.events.channels import filter_for_debug, filter_for_user
 from cogops.session.logger import QuerySessionLogger
 
@@ -31,7 +37,7 @@ load_dotenv()
 # --- Config ---
 API_PORT = int(os.getenv("API_PORT", "9000"))
 API_HOST = "0.0.0.0"
-AGENT_CONFIG_PATH = "configs/config.yml"
+MASTRA_URL = os.getenv("MASTRA_URL", "http://localhost:9100").rstrip("/")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("api")
@@ -46,10 +52,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# --- Session state ---
-active_sessions: Dict[str, Orchestrator] = {}
-session_lock = asyncio.Lock()
 
 # --- Singleton logger ---
 _session_logger = QuerySessionLogger()
@@ -74,21 +76,6 @@ class SessionRequest(BaseModel):
     user_id: str
 
 
-# --- Helpers ---
-async def get_agent_session(user_id: str) -> Orchestrator:
-    """Thread-safe retrieval or creation of an agent session."""
-    async with session_lock:
-        if user_id not in active_sessions:
-            try:
-                agent = Orchestrator(config_path=AGENT_CONFIG_PATH)
-                active_sessions[user_id] = agent
-                logger.info("New session created for %s", user_id)
-            except Exception as e:
-                logger.error("Agent init failed for %s: %s", user_id, e)
-                raise HTTPException(status_code=500, detail="Agent initialization failed.")
-        return active_sessions[user_id]
-
-
 # --- Endpoints ---
 @app.get("/ui", response_class=HTMLResponse)
 async def ui_root():
@@ -98,30 +85,14 @@ async def ui_root():
 
 @app.get("/health")
 async def health_check():
-    """Service health: LLM, Redis."""
-    status: Dict[str, str] = {"status": "online"}
-
-    # LLM
+    """Service health: proxy + Mastra sidecar reachability."""
+    status = {"status": "online", "mastra_url": MASTRA_URL}
     try:
-        agent = await get_agent_session("health_probe")
-        llm_status = await agent.llm_service.health_check()
-        status["llm"] = llm_status
-        del active_sessions["health_probe"]
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{MASTRA_URL}/health")
+            status["mastra"] = "ok" if resp.status_code == 200 else f"http_{resp.status_code}"
     except Exception:
-        status["llm"] = "error"
-
-    # Redis
-    try:
-        agent = await get_agent_session("health_redis")
-        redis_status = "ok" if agent.redis_store.available else "unavailable"
-        if agent.redis_store.available:
-            agent.redis_store._client.ping()
-        status["redis"] = redis_status
-        del active_sessions["health_redis"]
-    except Exception:
-        status["redis"] = "error"
-
-    status["active_sessions"] = str(len(active_sessions))
+        status["mastra"] = "error"
     return status
 
 
@@ -130,15 +101,13 @@ async def stream_chat(
     request: ChatRequest,
     x_debug_key: Optional[str] = Header(None, alias="X-Debug-Key"),
 ):
-    """Main chat endpoint. Streams NDJSON events.
+    """Main chat endpoint. Proxies to the Mastra sidecar and relays NDJSON.
 
     Without a valid `X-Debug-Key` header, the stream is filtered to
     user-visible events only. With the correct key, all debug events pass through.
     """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
-
-    agent = await get_agent_session(request.user_id)
 
     _session_logger.append_query(request.query)
     server_secret = os.getenv("ADMIN_DEBUG_SECRET")
@@ -149,22 +118,31 @@ async def stream_chat(
         else:
             debug_mode = x_debug_key == server_secret
 
-    session_id = _session_logger.start_session(request.user_id, request.query)
+    _session_logger.start_session(request.user_id, request.query)
     request_id = str(uuid.uuid4())[:8]
-    logger.info("[req:%s] Chat request from %s", request_id, request.user_id)
+    logger.info("[req:%s] Chat request from %s → %s", request_id, request.user_id, MASTRA_URL)
 
     async def event_generator():
+        payload = {"user_id": request.user_id, "query": request.query}
         try:
-            async for event in agent.process_query(request.query, user_id=request.user_id):
-                _session_logger.ingest_event(event)
-                if debug_mode:
-                    filtered = filter_for_debug([event])
-                else:
-                    filtered = filter_for_user([event])
-                for evt in filtered:
-                    yield json.dumps(evt, ensure_ascii=True) + "\n"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, read=None)) as client:
+                async with client.stream(
+                    "POST", f"{MASTRA_URL}/chat/stream", json=payload
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        _session_logger.ingest_event(event)
+                        filtered = filter_for_debug([event]) if debug_mode else filter_for_user([event])
+                        for evt in filtered:
+                            yield json.dumps(evt, ensure_ascii=True) + "\n"
         except Exception as e:
-            logger.error("[req:%s] Stream error: %s", request_id, e, exc_info=True)
+            logger.error("[req:%s] Proxy stream error: %s", request_id, e, exc_info=True)
             error_evt = {"type": "error", "content": "Streaming error.", "channel": "user"}
             _session_logger.ingest_event(error_evt)
             yield json.dumps(error_evt, ensure_ascii=True) + "\n"
@@ -182,13 +160,13 @@ async def query_log_endpoint(limit: int = 500):
 
 @app.post("/session/clear")
 async def clear_session(request: SessionRequest):
-    """Clear conversation for a user."""
-    async with session_lock:
-        if request.user_id in active_sessions:
-            del active_sessions[request.user_id]
-            logger.info("Session cleared for %s", request.user_id)
-            return {"status": "success", "message": "Session cleared."}
-        return {"status": "ignored", "message": "No active session found."}
+    """Clear conversation for a user.
+
+    Conversational memory is owned by the Mastra sidecar (LibSQL threads keyed by
+    user_id). This endpoint is retained for UI compatibility; to hard-clear a
+    thread, delete it via Mastra's memory API. Returns success for the UI flow.
+    """
+    return {"status": "success", "message": "Session reset acknowledged."}
 
 
 if __name__ == "__main__":

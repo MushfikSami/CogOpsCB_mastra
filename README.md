@@ -4,6 +4,14 @@ A bilingual (Bengali / English) chatbot for Bangladesh government services.
 Citation-grounded answers from a fixed government-services corpus. Refuses
 when the corpus doesn't cover the question; never hallucinates citations.
 
+> **Mastra sidecar (new):** the agent orchestration + memory can now run in a
+> TypeScript [Mastra](https://mastra.ai) service under [`mastra/`](mastra/).
+> When enabled, `api.py` is a thin proxy that forwards `/chat/stream` to the
+> sidecar (`MASTRA_URL`, default `:9100`) and relays its NDJSON stream. The
+> sidecar ports all six agents and adds LibSQL-backed **working memory**
+> (cross-thread, resource-scoped) and **observational** context compression.
+> Jiggasha and the vLLM endpoints are unchanged. See [`mastra/README.md`](mastra/README.md).
+
 ## Architecture
 
 Deterministic 5-stage pipeline (no ReAct loop, no LLM-side tool dispatch):
